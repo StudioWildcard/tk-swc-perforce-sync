@@ -47,6 +47,7 @@ class SgLatestPublishModel(ShotgunModel):
         self._publish_type_model = publish_type_model
         self._folder_icon = QtGui.QIcon(QtGui.QPixmap(":/res/folder_512x400.png"))
         self._loading_icon = QtGui.QIcon(QtGui.QPixmap(":/res/loading_512x400.png"))
+        self._perforce_icon = QtGui.QIcon(QtGui.QPixmap(":/res/perforce_1.png"))
         self._associated_items = {}
 
         app = sgtk.platform.current_bundle()
@@ -476,7 +477,20 @@ class SgLatestPublishModel(ShotgunModel):
             search_str += "%s " % type_link["name"]
         else:
             item.setData(None, SgLatestPublishModel.TYPE_ID_ROLE)
+            # default value
             item.setData("No Type", SgLatestPublishModel.PUBLISH_TYPE_NAME_ROLE)
+            try:
+                source = sg_data.get("source", None)
+                if source in ["Perforce"]:
+                    file_type_name = sg_data.get("file_type_name", None)
+                    if file_type_name:
+                        item.setData(file_type_name, SgLatestPublishModel.PUBLISH_TYPE_NAME_ROLE)
+                    #Todo: Add icon for perforce files
+                    # item.setIcon(self._perforce_icon)
+            except Exception as e:
+                logger.debug("Error setting file_type_name: {}".format(e))
+
+
 
         # add name and version to search string
         if sg_data.get("name"):

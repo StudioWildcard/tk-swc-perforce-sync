@@ -156,6 +156,10 @@ class PublishDelegate(shotgun_view.EditSelectedWidgetDelegate):
         is_folder = shotgun_model.get_sanitized_data(
             model_index, SgLatestPublishModel.IS_FOLDER_ROLE
         )
+        if sg_item:
+            publish_file_type = sg_item.get("published_file_type", None)
+            if publish_file_type not in ["PublishedFile"]:
+                return
         if sg_item is None:
             # an intermediate folder widget with no shotgun data
             pass

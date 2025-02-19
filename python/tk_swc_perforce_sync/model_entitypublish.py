@@ -411,6 +411,15 @@ class SgEntityPublishModel(ShotgunModel):
             item.setData(None, SgEntityPublishModel.TYPE_ID_ROLE)
             item.setData("No Type", SgEntityPublishModel.PUBLISH_TYPE_NAME_ROLE)
 
+            try:
+                source = sg_data.get("source", None)
+                if source in ["Perforce"]:
+                    file_type_name = sg_data.get("file_type_name", None)
+                    if file_type_name:
+                        item.setData(file_type_name, SgEntityPublishModel.PUBLISH_TYPE_NAME_ROLE)
+            except Exception as e:
+                logger.debug("Error setting file_type_name: {}".format(e))
+
         # add name and version to search string
         if sg_data.get("name"):
             search_str += " %s" % sg_data["name"]

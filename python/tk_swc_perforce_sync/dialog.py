@@ -374,6 +374,9 @@ class AppDialog(QWidget):
 
         # set up right click menu for the main publish view
 
+        self._fix_action = QAction("Fix", self.ui.publish_view)
+        self._fix_action.triggered.connect(lambda: self._on_publish_model_action("fix"))
+
         self._add_action = QAction("Add", self.ui.publish_view)
         self._add_action.triggered.connect(lambda: self._on_publish_model_action("add"))
         self._edit_action = QAction("Edit", self.ui.publish_view)
@@ -770,41 +773,6 @@ class AppDialog(QWidget):
         # call the base class implementation
         super().showEvent(event)
 
-
-
-
-    def _show_publish_actions_old(self, pos):
-        """
-        Shows the actions for the current publish selection.
-
-        :param pos: Local coordinates inside the viewport when the context menu was requested.
-        """
-
-        # Build a menu with all the actions.
-        menu = QMenu(self)
-        actions = self._action_manager.get_actions_for_publishes(
-            self.selected_publishes, self._action_manager.UI_AREA_MAIN
-        )
-        menu.addActions(actions)
-
-        # Qt is our friend here. If there are no actions available, the separator won't be added, yay!
-        menu.addSeparator()
-        menu.addAction(self._add_action)
-        menu.addAction(self._edit_action)
-        menu.addAction(self._delete_action)
-        menu.addSeparator()
-        menu.addAction(self._revert_action)
-        menu.addSeparator()
-        menu.addAction(self._refresh_action)
-        menu.addSeparator()
-        menu.addAction(self._preview_create_folder_action)
-        menu.addAction(self._create_folders_action)
-        menu.addAction(self._unregister_folders_action)
-
-
-        # Wait for the user to pick something.
-        menu.exec_(self.ui.publish_view.mapToGlobal(pos))
-
     def _show_publish_actions(self, pos):
         """
         Shows the actions for the current publish selection.
@@ -832,6 +800,8 @@ class AppDialog(QWidget):
             menu.addAction(self._unregister_folders_action)
         else:
             # Add non-folder-specific actions
+            menu.addAction(self._fix_action)
+            menu.addSeparator()
             menu.addAction(self._add_action)
             menu.addAction(self._edit_action)
             menu.addAction(self._delete_action)
@@ -2380,6 +2350,7 @@ class AppDialog(QWidget):
 
         dt = sg_item.get("created_at") or sg_item.get("headModTime") or sg_item.get("headTime") or None
         # logger.debug(">>> dt: {}".format(dt))
+        dt = float(dt) if dt else 0
         date = self._get_publish_time_for_column_view(dt)
         new_sg_item["date"] = date
         # logger.debug(">>> date: {}".format(date))
@@ -3359,6 +3330,12 @@ class AppDialog(QWidget):
                     __clear_publish_file_history(self._no_selection_pixmap)
                     __set_publish_ui_visibility(False)
                     return
+                publish_type = sg_item.get("type", None)
+                if publish_type not in ["PublishedFile"]:
+                    logger.debug("Type is not PublishedFile")
+                    __clear_publish_file_history(self._no_selection_pixmap)
+                    __set_publish_ui_visibility(False)
+                    return
 
                 __set_publish_ui_visibility(True)
                 """
@@ -3584,6 +3561,9 @@ class AppDialog(QWidget):
 
         inactive_pending_image_path = os.path.join(repo_root, "icons/pending_off.png")
         pending_icon_inactive = QIcon(QPixmap(inactive_pending_image_path))
+
+        perforce_publish_image_path = os.path.join(repo_root, "icons/perforce_1.png")
+        perforce_publish_icon = QIcon(QPixmap(perforce_publish_image_path))
 
         self.ui.column_mode.setIcon(inactive_column_view_icon)
         self.ui.submitted_mode.setIcon(submitted_icon_inactive)
@@ -4294,6 +4274,11 @@ class AppDialog(QWidget):
             item = source_index.model().itemFromIndex(source_index)
 
             sg_data = item.get_sg_data()
+
+            published_file_type = sg_data.get('type', None)
+            if published_file_type not in ['PublishedFile']:
+                __clear_publish_file_history(self._no_selection_pixmap)
+                return
             """
             if sg_data:
                 # published_file_type = sg_data.get('published_file_type', None)
@@ -4707,11 +4692,14 @@ class AppDialog(QWidget):
         else:
             # Run default action.
             sg_item = shotgun_model.get_sg_data(model_index)
-            default_action = self._action_manager.get_default_action_for_publish(
-                sg_item, self._action_manager.UI_AREA_MAIN
-            )
-            if default_action:
-                default_action.trigger()
+            published_type = sg_item.get("type", None)
+            # Todo: Check if there are other types that need to be handled
+            if published_type in ["PublishedFile"]:
+                default_action = self._action_manager.get_default_action_for_publish(
+                    sg_item, self._action_manager.UI_AREA_MAIN
+                )
+                if default_action:
+                    default_action.trigger()
 
     def get_p4(self):
         return self._p4
@@ -5292,6 +5280,14 @@ class AppDialog(QWidget):
         versions = self._app.shotgun("Version", filters, fields, order=[{"field_name": "created_at", "direction": "asc"}])
 
         logger.debug("versions {}".format(versions))
+
+    def _on_fix_list(self):
+        # self._submitted_data_to_publish = []
+        # logger.debug(">>>>>>>>>>   self._submitted_data_to_publish {}".format( self._submitted_data_to_publish))
+        self._publish_submitted_data_using_command_line()
+
+        self._setup_file_details_panel([])
+        self._on_treeview_item_selected()
 
     def _on_fix_selected(self):
         """
@@ -7653,6 +7649,7 @@ class AppDialog(QWidget):
     def _on_publish_model_action(self, action):
         selected_indexes = self.ui.publish_view.selectionModel().selectedIndexes()
         selected_actions = []
+        self._submitted_data_to_publish = []
         for model_index in selected_indexes:
             proxy_model = model_index.model()
             source_index = proxy_model.mapToSource(model_index)
@@ -7666,6 +7663,15 @@ class AppDialog(QWidget):
                     if "local_path" in sg_item["path"]:
                         target_file = sg_item["path"].get("local_path", None)
                         depot_file = sg_item.get("depotFile", None)
+                        if action in ["fix"]:
+                            published_file_type = sg_item.get("published_file_type", None)
+                            if published_file_type not in ["PublishedFile"]:
+                                msg = "Fixing file {} ...".format(target_file)
+                                self._add_log(msg, 3)
+                                self._submitted_data_to_publish.append(sg_item)
+                            else:
+                                msg = "Cannot fix file {} as it is already published.".format(target_file)
+                                self._add_log(msg, 2)
 
                         if action in ["add", "move/add", "edit", "delete"]:
                             sg_item_action = sg_item.get("action", None)
@@ -7690,6 +7696,9 @@ class AppDialog(QWidget):
                             p4_result = self._p4.run("revert", target_file)
                             if p4_result:
                                 self.refresh_publish_data()
+
+        if self._submitted_data_to_publish:
+            self._on_fix_list()
 
         if selected_actions:
             self.perform_changelist_selection(selected_actions)

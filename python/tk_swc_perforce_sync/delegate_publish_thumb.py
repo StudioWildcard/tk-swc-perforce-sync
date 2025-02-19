@@ -91,6 +91,8 @@ class SgPublishThumbDelegate(PublishDelegate):
 
         # Extract the Shotgun data and field value from the model index.
         (sg_data, field_value) = model_item_data.get_item_data(model_index)
+        # logger.debug(">>>>>>_format_folder:  sg_data: %s" % sg_data)
+        # logger.debug(">>>>>>_format_folder:  field_value: %s" % field_value)
 
         header_text = ""
         details_text = ""
@@ -141,6 +143,15 @@ class SgPublishThumbDelegate(PublishDelegate):
 
         # this is a publish!
         sg_data = shotgun_model.get_sg_data(model_index)
+        # logger.debug(">>>>>>_format_publish:  sg_data: %s" % sg_data)
+        try:
+            source = sg_data.get("source", None)
+            if source in ["Perforce"] and "published_file_type" not in sg_data:
+                file_type_name = sg_data.get("file_type_name", None)
+                if file_type_name:
+                    sg_data["published_file_type"] = {'id': 265, 'name': file_type_name, 'type': 'PublishedFileType'}
+        except Exception as e:
+            logger.debug(">>>>>>_format_publish:  error: %s" % e)
 
         header_text = ""
         details_text = ""

@@ -290,7 +290,7 @@ class SgPublishListDelegate(PublishDelegate):
                 author_str,
                 date_str,
             )
-        elif published_file_type in ['depotFile']:
+        elif published_file_type in ['depotFile', 'Perforce']:
             pub_type_str = sg_data.get("depot_file_type", "No Type")
             created_unixtime = int(sg_data.get("headModTime")) or 0
 
