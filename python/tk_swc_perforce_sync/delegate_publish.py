@@ -4,11 +4,15 @@ from sgtk.platform.qt import QtCore, QtGui
 
 from .model_latestpublish import SgLatestPublishModel
 
+import os
+
 # import the shotgun_model and view modules from the shotgun utils framework
 shotgun_model = sgtk.platform.import_framework(
     "tk-swc-framework-shotgunutils", "shotgun_model"
 )
 shotgun_view = sgtk.platform.import_framework("tk-framework-qtwidgets", "views")
+
+logger = sgtk.platform.get_logger(__name__)
 
 
 class PublishWidget(QtGui.QWidget):
@@ -50,6 +54,8 @@ class PublishWidget(QtGui.QWidget):
             highlight_col.green(),
             highlight_col.blue(),
         )
+
+
 
     @property
     def action_menu_is_empty(self):
@@ -128,6 +134,14 @@ class PublishDelegate(shotgun_view.EditSelectedWidgetDelegate):
         self._sub_items_mode = False
         shotgun_view.EditSelectedWidgetDelegate.__init__(self, view)
 
+        self.repo_root = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
+        self._perforce_path = os.path.join(self.repo_root, "icons/perforce_4.png")
+        self._perforce_icon = QtGui.QIcon(QtGui.QPixmap(self._perforce_path))
+
+        #self._perforce_icon = QtGui.QIcon(QtGui.QPixmap(":/res/perforce_1.png"))
+
     def set_sub_items_mode(self, enabled):
         """
         Enables rendering of cells in to work with the sub items
@@ -156,10 +170,7 @@ class PublishDelegate(shotgun_view.EditSelectedWidgetDelegate):
         is_folder = shotgun_model.get_sanitized_data(
             model_index, SgLatestPublishModel.IS_FOLDER_ROLE
         )
-        if sg_item:
-            publish_file_type = sg_item.get("published_file_type", None)
-            if publish_file_type not in ["PublishedFile"]:
-                return
+
         if sg_item is None:
             # an intermediate folder widget with no shotgun data
             pass
@@ -210,6 +221,60 @@ class PublishDelegate(shotgun_view.EditSelectedWidgetDelegate):
         if icon:
             thumb = icon.pixmap(512)
             widget.set_thumbnail(thumb)
+
+        sg_item = shotgun_model.get_sg_data(model_index)
+        is_folder = shotgun_model.get_sanitized_data(
+            model_index, SgLatestPublishModel.IS_FOLDER_ROLE
+        )
+
+
+
+        """
+        try:
+            if is_folder:
+                if icon:
+                    thumb = icon.pixmap(512)
+                    widget.set_thumbnail(thumb)
+            else:
+                if sg_item:
+                    publish_file_type = sg_item.get("published_file_type", None)
+                    image = sg_item.get("image", None)
+                    logger.debug(">>>> publish_file_type: %s" % publish_file_type)
+                    logger.debug(">>>> image: %s" % image)
+                    if publish_file_type not in ["PublishedFile"]:
+                        perforce_pixmap = self._perforce_icon.pixmap(512, 512)
+                        if not perforce_pixmap.isNull():
+                            widget.set_thumbnail(perforce_pixmap)
+                    else:
+                        if icon:
+                            thumb = icon.pixmap(512)
+                            widget.set_thumbnail(thumb)
+
+        except Exception as e:
+            logger.debug("Error setting thumbnail: %s" % e)
+        """
+        """
+        try:
+            if sg_item and not is_folder:
+                publish_file_type = sg_item.get("published_file_type", None)
+                logger.debug(">>>> publish_file_type: %s" % publish_file_type)
+                if publish_file_type not in ["PublishedFile"]:
+                    # Convert QIcon to QPixmap before setting the thumbnail
+                    perforce_pixmap = self._perforce_icon.pixmap(512, 512)
+                    if not perforce_pixmap.isNull():
+                        widget.set_thumbnail(perforce_pixmap)
+
+                else:
+                    icon = shotgun_model.get_sanitized_data(model_index, QtCore.Qt.DecorationRole)
+
+                    if icon:
+                        thumb = icon.pixmap(512)
+                        widget.set_thumbnail(thumb)
+
+        except Exception as e:
+            logger.debug("Error setting thumbnail: %s" % e)
+        """
+
 
         if shotgun_model.get_sanitized_data(
             model_index, SgLatestPublishModel.IS_FOLDER_ROLE

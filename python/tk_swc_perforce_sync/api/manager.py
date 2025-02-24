@@ -73,57 +73,59 @@ class LoaderManager(object):
 
         :return: List of dictionaries, each with keys name, params, caption and description
         """
-
-        if self._publish_type_field not in sg_data.keys():
+        action_defs = []
+        if self._publish_type_field in sg_data.keys():
+            """
             raise TankError(
                 "Missing {} field in Shotgun data dictionary.".format(
                     self._publish_type_field
                 )
             )
+            """
 
-        # Figure out the type of the publish
-        publish_type_dict = sg_data.get(self._publish_type_field)
-        if publish_type_dict is None:
-            # this publish does not have a type
-            publish_type = "undefined"
-        else:
-            publish_type = publish_type_dict["name"]
+            # Figure out the type of the publish
+            publish_type_dict = sg_data.get(self._publish_type_field)
+            if publish_type_dict is None:
+                # this publish does not have a type
+                publish_type = "undefined"
+            else:
+                publish_type = publish_type_dict["name"]
 
-        # check if we have logic configured to handle this publish type.
-        mappings = self._bundle.get_setting("action_mappings")
-        # returns a structure on the form
-        # { "Maya Scene": ["reference", "import"] }
-        actions = mappings.get(publish_type, [])
+            # check if we have logic configured to handle this publish type.
+            mappings = self._bundle.get_setting("action_mappings")
+            # returns a structure on the form
+            # { "Maya Scene": ["reference", "import"] }
+            actions = mappings.get(publish_type, [])
 
-        if len(actions) == 0:
-            return []
+            if len(actions) == 0:
+                return []
 
-        # cool so we have one or more actions for this publish type.
-        # resolve UI area
-        if ui_area == LoaderManager.UI_AREA_DETAILS:
-            ui_area_str = "details"
-        elif ui_area == LoaderManager.UI_AREA_HISTORY:
-            ui_area_str = "history"
-        elif ui_area == LoaderManager.UI_AREA_MAIN:
-            ui_area_str = "main"
-        else:
-            raise TankError("Unsupported UI_AREA. Contact support.")
+            # cool so we have one or more actions for this publish type.
+            # resolve UI area
+            if ui_area == LoaderManager.UI_AREA_DETAILS:
+                ui_area_str = "details"
+            elif ui_area == LoaderManager.UI_AREA_HISTORY:
+                ui_area_str = "history"
+            elif ui_area == LoaderManager.UI_AREA_MAIN:
+                ui_area_str = "main"
+            else:
+                raise TankError("Unsupported UI_AREA. Contact support.")
 
-        # convert created_at unix time stamp to shotgun time stamp
-        self._fix_timestamp(sg_data)
+            # convert created_at unix time stamp to shotgun time stamp
+            self._fix_timestamp(sg_data)
 
-        action_defs = []
-        try:
-            # call out to hook to give us the specifics.
-            action_defs = self._bundle.execute_hook_method(
-                "actions_hook",
-                "generate_actions",
-                sg_publish_data=sg_data,
-                actions=actions,
-                ui_area=ui_area_str,
-            )
-        except Exception:
-            self._logger.exception("Could not execute generate_actions hook.")
+
+            try:
+                # call out to hook to give us the specifics.
+                action_defs = self._bundle.execute_hook_method(
+                    "actions_hook",
+                    "generate_actions",
+                    sg_publish_data=sg_data,
+                    actions=actions,
+                    ui_area=ui_area_str,
+                )
+            except Exception:
+                self._logger.exception("Could not execute generate_actions hook.")
 
         return action_defs
 

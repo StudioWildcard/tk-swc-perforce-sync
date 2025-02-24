@@ -799,16 +799,33 @@ class AppDialog(QWidget):
             menu.addAction(self._create_folders_action)
             menu.addAction(self._unregister_folders_action)
         else:
-            # Add non-folder-specific actions
-            menu.addAction(self._fix_action)
-            menu.addSeparator()
-            menu.addAction(self._add_action)
-            menu.addAction(self._edit_action)
-            menu.addAction(self._delete_action)
-            menu.addSeparator()
-            menu.addAction(self._revert_action)
-            menu.addSeparator()
-            menu.addAction(self._refresh_action)
+            try:
+                sg_item = shotgun_model.get_sg_data(model_index)
+
+                # Find out if selected is a published file or not
+                if sg_item:
+                    # logger.debug(">>>> _show_publish_actions: sg_item: {}".format(sg_item))
+                    is_published = sg_item.get("published_file_type", None)
+                    logger.debug(">>>> _show_publish_actions: is_published: {}".format(is_published))
+                    if is_published:
+                        # Add non-folder-specific actions
+                        menu.addAction(self._add_action)
+                        menu.addAction(self._edit_action)
+                        menu.addAction(self._delete_action)
+                        menu.addSeparator()
+                        menu.addAction(self._revert_action)
+                        menu.addSeparator()
+                        menu.addAction(self._refresh_action)
+                    else:
+                        menu.addAction(self._fix_action)
+                        menu.addSeparator()
+                        menu.addAction(self._revert_action)
+                        menu.addSeparator()
+                        menu.addAction(self._refresh_action)
+            except Exception as e:
+                logger.debug(">>>> _show_publish_actions: Error: {}".format(e))
+
+
 
         # Wait for the user to pick something.
         menu.exec_(self.ui.publish_view.mapToGlobal(pos))
