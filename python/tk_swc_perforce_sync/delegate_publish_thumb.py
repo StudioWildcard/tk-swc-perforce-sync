@@ -144,12 +144,14 @@ class SgPublishThumbDelegate(PublishDelegate):
         # this is a publish!
         sg_data = shotgun_model.get_sg_data(model_index)
         # logger.debug(">>>>>>_format_publish:  sg_data: %s" % sg_data)
+        current_file_type = "Publish"
         try:
             source = sg_data.get("source", None)
             if source in ["Perforce"] and "published_file_type" not in sg_data:
-                file_type_name = sg_data.get("file_type_name", None)
-                if file_type_name:
-                    sg_data["published_file_type"] = {'id': 265, 'name': file_type_name, 'type': 'PublishedFileType'}
+                current_file_type = "Perforce"
+                # file_type_name = sg_data.get("file_type_name", None)
+                # if file_type_name:
+                #     sg_data["published_file_type"] = {'id': 265, 'name': file_type_name, 'type': 'PublishedFileType'}
         except Exception as e:
             logger.debug(">>>>>>_format_publish:  error: %s" % e)
 
@@ -198,38 +200,75 @@ class SgPublishThumbDelegate(PublishDelegate):
 
         # get the name (lighting v3)
         name_str = ""
-        action = sg_data.get("action") or sg_data.get("headAction") or None
-        if action:
-            self.actions_icons = Icons()
-            icon_path = self.actions_icons.get_icon_path(action)
-            #action_icon, icon_path = get_action_icon(action)
-            # logger.debug("icon_path: %s" % icon_path)
-            icon_html = '<img src="%s" />' % icon_path
-            name_str = "%s " % icon_html
-        if sg_data.get("name"):
-            name_str += sg_data.get("name")
+        if current_file_type == "Publish":
+            action = sg_data.get("action") or sg_data.get("headAction") or None
+            if action:
+                self.actions_icons = Icons()
+                icon_path = self.actions_icons.get_icon_path(action)
+                #action_icon, icon_path = get_action_icon(action)
+                # logger.debug("icon_path: %s" % icon_path)
+                icon_html = '<img src="%s" />' % icon_path
+                name_str = "%s " % icon_html
+            if sg_data.get("name"):
+                name_str += sg_data.get("name")
 
-        #if sg_data.get("version_number"):
-        #    name_str += " v%s" % sg_data.get("version_number")
+            #if sg_data.get("version_number"):
+            #    name_str += " v%s" % sg_data.get("version_number")
 
 
 
-        # now we are tracking whether this item has a unique task/name/type combo
-        # or not via the specially injected task_uniqueness boolean.
-        # If this is true, that means that this is the only item in the listing
-        # with this name/type combo, and we can render its display name on two
-        # lines, name first and then type, e.g.:
-        # MyScene, v3
-        # Maya Render
-        #
-        # However, there can be multiple *different* tasks which have the same
-        # name/type combo - in this case, we want to display the task name too
-        # since this is what differentiates the data. In that case we display it:
-        # MyScene, v3 (Layout)
-        # Maya Render
-        #
-        if sg_data.get("task_uniqueness") == False and sg_data.get("task") is not None:
-            name_str += " (%s)" % sg_data["task"]["name"]
+            # now we are tracking whether this item has a unique task/name/type combo
+            # or not via the specially injected task_uniqueness boolean.
+            # If this is true, that means that this is the only item in the listing
+            # with this name/type combo, and we can render its display name on two
+            # lines, name first and then type, e.g.:
+            # MyScene, v3
+            # Maya Render
+            #
+            # However, there can be multiple *different* tasks which have the same
+            # name/type combo - in this case, we want to display the task name too
+            # since this is what differentiates the data. In that case we display it:
+            # MyScene, v3 (Layout)
+            # Maya Render
+            #
+            if sg_data.get("task_uniqueness") == False and sg_data.get("task") is not None:
+                name_str += " (%s)" % sg_data["task"]["name"]
+
+        elif current_file_type == "Perforce":
+            action = sg_data.get("action") or sg_data.get("headAction") or None
+            if action:
+                self.actions_icons = Icons()
+                icon_path = self.actions_icons.get_icon_path(action)
+                # action_icon, icon_path = get_action_icon(action)
+                # logger.debug("icon_path: %s" % icon_path)
+                icon_html = '<img src="%s" />' % icon_path
+                name_str = "%s " % icon_html
+            if sg_data.get("name"):
+                name = sg_data.get("name")
+                name_str += "<span style='color:rgb(140, 0, 0)'>  %s  </span>" % (
+                    name
+                )
+
+
+            # if sg_data.get("version_number"):
+            #    name_str += " v%s" % sg_data.get("version_number")
+
+            # now we are tracking whether this item has a unique task/name/type combo
+            # or not via the specially injected task_uniqueness boolean.
+            # If this is true, that means that this is the only item in the listing
+            # with this name/type combo, and we can render its display name on two
+            # lines, name first and then type, e.g.:
+            # MyScene, v3
+            # Maya Render
+            #
+            # However, there can be multiple *different* tasks which have the same
+            # name/type combo - in this case, we want to display the task name too
+            # since this is what differentiates the data. In that case we display it:
+            # MyScene, v3 (Layout)
+            # Maya Render
+            #
+            if sg_data.get("task_uniqueness") == False and sg_data.get("task") is not None:
+                name_str += " (%s)" % sg_data["task"]["name"]
 
         # make this the title of the card
         header_text = name_str
@@ -237,55 +276,104 @@ class SgPublishThumbDelegate(PublishDelegate):
         # check if we are in "deep mode". In that case, display the entity link info
         # on the thumb card. Otherwise, display the type.
         details_text = ""
-        if sg_data.get("revision") is not None:
-            action = sg_data.get("action", None)
-            if action and action == "delete":
-                details_text += "<span style='color:rgb(255, 0, 0)'>x</span>"
-            revision = sg_data.get("revision", None)
-            if revision:
-                details_text += "<span style='color:#2C93E2'>  #%s  </span>" % (
-                    revision
-                )
+        if current_file_type == "Publish":
+            if sg_data.get("revision") is not None:
+                action = sg_data.get("action", None)
+                if action and action == "delete":
+                    details_text += "<span style='color:rgb(255, 0, 0)'>x</span>"
+                revision = sg_data.get("revision", None)
+                if revision:
+                    details_text += "<span style='color:#2C93E2'>  #%s  </span>" % (
+                        revision
+                    )
 
-        if sg_data.get("action") is not None:
-            action = sg_data.get("action", None)
-            details_text += "<span style='color:#2C93E2'>  %s  </span>" % (
-                action
-            )
-        else:
-            if sg_data.get("headAction") is not None:
-                head_action = sg_data.get("headAction", None)
+            if sg_data.get("action") is not None:
+                action = sg_data.get("action", None)
                 details_text += "<span style='color:#2C93E2'>  %s  </span>" % (
-                    head_action
+                    action
                 )
-
-
-        if self._sub_items_mode:
-
-            # display this publish in sub items node
-            # in this case we want to display the following two lines
-            # main_body v3
-            # Shot AAA001
-
-            # get the name of the associated entity
-            entity_link = sg_data.get("entity")
-            if entity_link is None:
-                details_text += " Unlinked"
             else:
-                entity_link_type = shotgun_globals.get_type_display_name(
-                    entity_link["type"]
-                )
-                details_text += " %s %s" % (entity_link_type, entity_link["name"])
+                if sg_data.get("headAction") is not None:
+                    head_action = sg_data.get("headAction", None)
+                    details_text += "<span style='color:#2C93E2'>  %s  </span>" % (
+                        head_action
+                    )
 
-        else:
-            # std publish - render with a name and a publish type
-            # main_body v3
-            # Render
-            details_text += shotgun_model.get_sanitized_data(
-                model_index, SgLatestPublishModel.PUBLISH_TYPE_NAME_ROLE
-            )
+
+            if self._sub_items_mode:
+
+                # display this publish in sub items node
+                # in this case we want to display the following two lines
+                # main_body v3
+                # Shot AAA001
+
+                # get the name of the associated entity
+                entity_link = sg_data.get("entity")
+                if entity_link is None:
+                    details_text += " Unlinked"
+                else:
+                    entity_link_type = shotgun_globals.get_type_display_name(
+                        entity_link["type"]
+                    )
+                    details_text += " %s %s" % (entity_link_type, entity_link["name"])
+
+            else:
+                # std publish - render with a name and a publish type
+                # main_body v3
+                # Render
+                details_text += shotgun_model.get_sanitized_data(
+                    model_index, SgLatestPublishModel.PUBLISH_TYPE_NAME_ROLE
+                )
+        elif current_file_type == "Perforce":
+            if sg_data.get("revision") is not None:
+                action = sg_data.get("action", None)
+                if action and action == "delete":
+                    details_text += "<span style='color:rgb(200, 0, 0)'>x</span>"
+                revision = sg_data.get("revision", None)
+                if revision:
+                    details_text += "<span style='color:rgb(140, 0, 0)'>  #%s  </span>" % (
+                        revision
+                    )
+
+            if sg_data.get("action") is not None:
+                action = sg_data.get("action", None)
+                details_text += "<span style='color:rgb(140, 0, 0)'>  %s  </span>" % (
+                    action
+                )
+            else:
+                if sg_data.get("headAction") is not None:
+                    head_action = sg_data.get("headAction", None)
+                    details_text += "<span style='color:rgb(140, 0, 0)'>  %s  </span>" % (
+                        head_action
+                    )
+
+            if self._sub_items_mode:
+
+                # display this publish in sub items node
+                # in this case we want to display the following two lines
+                # main_body v3
+                # Shot AAA001
+
+                # get the name of the associated entity
+                entity_link = sg_data.get("entity")
+                if entity_link is None:
+                    details_text += " Unlinked"
+                else:
+                    entity_link_type = shotgun_globals.get_type_display_name(
+                        entity_link["type"]
+                    )
+                    details_text += " %s %s" % (entity_link_type, entity_link["name"])
+
+            else:
+                # std publish - render with a name and a publish type
+                # main_body v3
+                # Render
+                details_text += shotgun_model.get_sanitized_data(
+                    model_index, SgLatestPublishModel.PUBLISH_TYPE_NAME_ROLE
+                )
 
         widget.set_text(header_text, details_text)
+
 
     def sizeHint(self, style_options, model_index):
         """

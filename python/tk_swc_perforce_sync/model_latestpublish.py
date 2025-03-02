@@ -484,9 +484,12 @@ class SgLatestPublishModel(ShotgunModel):
                 if source in ["Perforce"]:
                     file_type_name = sg_data.get("file_type_name", None)
                     if file_type_name:
-                        item.setData(file_type_name, SgLatestPublishModel.PUBLISH_TYPE_NAME_ROLE)
-                    #Todo: Add icon for perforce files
-                    # item.setIcon(self._perforce_icon)
+                        details_text = "<span style='color:rgb(140, 0, 0)'>  #%s  </span>" % (
+                            file_type_name
+                        )
+                        # item.setData(file_type_name, SgLatestPublishModel.PUBLISH_TYPE_NAME_ROLE)
+                        item.setData(details_text, SgLatestPublishModel.PUBLISH_TYPE_NAME_ROLE)
+
             except Exception as e:
                 logger.debug("Error setting file_type_name: {}".format(e))
 

@@ -137,7 +137,8 @@ class PublishDelegate(shotgun_view.EditSelectedWidgetDelegate):
         self.repo_root = os.path.normpath(
             os.path.join(os.path.dirname(__file__), "..", "..")
         )
-        self._perforce_path = os.path.join(self.repo_root, "icons/perforce_4.png")
+        # self._perforce_path = os.path.join(self.repo_root, "icons/perforce_4.png")
+        self._perforce_path = os.path.join(self.repo_root, "icons/perforce_12.png")
         self._perforce_icon = QtGui.QIcon(QtGui.QPixmap(self._perforce_path))
 
         #self._perforce_icon = QtGui.QIcon(QtGui.QPixmap(":/res/perforce_1.png"))
@@ -216,11 +217,11 @@ class PublishDelegate(shotgun_view.EditSelectedWidgetDelegate):
         else:
             widget.set_button_visible(False)
 
+        # Reset the thumbnail to avoid persisting previous thumbnails
+        # widget.set_thumbnail(QtGui.QPixmap())  # Clear the existing thumbnail first
+
         icon = shotgun_model.get_sanitized_data(model_index, QtCore.Qt.DecorationRole)
 
-        if icon:
-            thumb = icon.pixmap(512)
-            widget.set_thumbnail(thumb)
 
         sg_item = shotgun_model.get_sg_data(model_index)
         is_folder = shotgun_model.get_sanitized_data(
@@ -228,8 +229,6 @@ class PublishDelegate(shotgun_view.EditSelectedWidgetDelegate):
         )
 
 
-
-        """
         try:
             if is_folder:
                 if icon:
@@ -237,48 +236,75 @@ class PublishDelegate(shotgun_view.EditSelectedWidgetDelegate):
                     widget.set_thumbnail(thumb)
             else:
                 if sg_item:
-                    publish_file_type = sg_item.get("published_file_type", None)
-                    image = sg_item.get("image", None)
-                    logger.debug(">>>> publish_file_type: %s" % publish_file_type)
-                    logger.debug(">>>> image: %s" % image)
-                    if publish_file_type not in ["PublishedFile"]:
+                    source = sg_item.get("source", None)
+                    if source and source in ["Perforce"]:
                         perforce_pixmap = self._perforce_icon.pixmap(512, 512)
                         if not perforce_pixmap.isNull():
+                            # logger.debug("SETTING PERFORCE PIXMAP for %s" % sg_item)
                             widget.set_thumbnail(perforce_pixmap)
                     else:
                         if icon:
+                            # logger.debug("SETTING DEFAULT ICON PIXMAP for %s" % sg_item)
                             thumb = icon.pixmap(512)
                             widget.set_thumbnail(thumb)
 
         except Exception as e:
             logger.debug("Error setting thumbnail: %s" % e)
-        """
-        """
-        try:
-            if sg_item and not is_folder:
-                publish_file_type = sg_item.get("published_file_type", None)
-                logger.debug(">>>> publish_file_type: %s" % publish_file_type)
-                if publish_file_type not in ["PublishedFile"]:
-                    # Convert QIcon to QPixmap before setting the thumbnail
-                    perforce_pixmap = self._perforce_icon.pixmap(512, 512)
-                    if not perforce_pixmap.isNull():
-                        widget.set_thumbnail(perforce_pixmap)
-
-                else:
-                    icon = shotgun_model.get_sanitized_data(model_index, QtCore.Qt.DecorationRole)
-
-                    if icon:
-                        thumb = icon.pixmap(512)
-                        widget.set_thumbnail(thumb)
-
-        except Exception as e:
-            logger.debug("Error setting thumbnail: %s" % e)
-        """
 
 
         if shotgun_model.get_sanitized_data(
             model_index, SgLatestPublishModel.IS_FOLDER_ROLE
         ):
+            self._format_folder(model_index, widget)
+        else:
+            self._format_publish(model_index, widget)
+
+    def _on_before_paint_2(self, widget, model_index, style_options):
+        """
+        Ensures that only the correct widget gets the perforce_pixmap thumbnail.
+        """
+        is_selected = self._view.selectionModel().isSelected(model_index)
+        widget.set_selected(is_selected)
+
+        # Reset the thumbnail first to avoid incorrect inheritance
+        widget.set_thumbnail(QtGui.QPixmap())
+
+        # Retrieve ShotGrid data
+        icon = shotgun_model.get_sanitized_data(model_index, QtCore.Qt.DecorationRole)
+        sg_item = shotgun_model.get_sg_data(model_index)
+        is_folder = shotgun_model.get_sanitized_data(
+            model_index, SgLatestPublishModel.IS_FOLDER_ROLE
+        )
+
+        try:
+            if is_folder:
+                # Folder case
+                if icon:
+                    widget.set_thumbnail(icon.pixmap(512))
+            else:
+                # Published file case
+                if sg_item:
+                    publish_file_type = sg_item.get("published_file_type", None)
+                    image = sg_item.get("image", None)
+                    logger.debug(">>>> publish_file_type: %s" % publish_file_type)
+                    logger.debug(">>>> image: %s" % image)
+                    source = sg_item.get("source", None)
+                    if source and "perforce" in source:
+                        perforce_pixmap = self._perforce_icon.pixmap(512, 512)
+                        if not perforce_pixmap.isNull():
+                            logger.debug("SETTING PERFORCE PIXMAP for %s" % sg_item)
+                            widget.set_thumbnail(perforce_pixmap)
+                        else:
+                            logger.warning("Perforce pixmap is NULL!")
+                    elif icon:
+                        logger.debug("SETTING DEFAULT ICON PIXMAP for %s" % sg_item)
+                        widget.set_thumbnail(icon.pixmap(512))  # Set correct thumbnail
+
+        except Exception as e:
+            logger.error("Error setting thumbnail: %s" % e)
+
+        # Apply final styling
+        if is_folder:
             self._format_folder(model_index, widget)
         else:
             self._format_publish(model_index, widget)

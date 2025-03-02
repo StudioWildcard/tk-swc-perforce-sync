@@ -416,7 +416,11 @@ class SgEntityPublishModel(ShotgunModel):
                 if source in ["Perforce"]:
                     file_type_name = sg_data.get("file_type_name", None)
                     if file_type_name:
+                        details_text = "<span style='color:rgb(140, 0, 0)'>  #%s  </span>" % (
+                            file_type_name
+                        )
                         item.setData(file_type_name, SgEntityPublishModel.PUBLISH_TYPE_NAME_ROLE)
+                        # item.setData(details_text, SgEntityPublishModel.PUBLISH_TYPE_NAME_ROLE)
             except Exception as e:
                 logger.debug("Error setting file_type_name: {}".format(e))
 

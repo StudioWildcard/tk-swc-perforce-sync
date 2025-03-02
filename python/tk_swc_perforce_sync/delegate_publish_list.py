@@ -196,22 +196,12 @@ class SgPublishListDelegate(PublishDelegate):
         if action:
             self.actions_icons = Icons()
             icon_path = self.actions_icons.get_icon_path(action)
-            #action_icon, icon_path = get_action_icon(action)
-            #action_icon, icon_path = get_action_icon(action)
-            #logger.debug(">>>>>>>>>>>> _format_publish: icon_path: {}".format(icon_path))
             icon_html = '<img src="%s" />' % icon_path
             #logger.debug(">>>>>>>>>>>> _format_publish: icon_html: {}".format(icon_html))
             main_text += "%s " % icon_html
 
         main_text += "<b>%s</b>" % (sg_data.get("name") or "Unnamed")
 
-        """
-        if published_file_type in ['PublishedFile']:
-            version = sg_data.get("version_number", None)
-            vers_str = "%03d" % version if version is not None else "N/A"
-
-            main_text += " Version %s" % vers_str
-        """
 
         # If we are in "show subfolders mode, this line will contain
         # the entity information (because we are displaying info from several entities
@@ -268,7 +258,6 @@ class SgPublishListDelegate(PublishDelegate):
         small_text = ""
 
         if published_file_type in ['PublishedFile']:
-            # Quicktime by John Smith at 2014-02-23 10:34
             pub_type_str = shotgun_model.get_sanitized_data(
                 model_index, SgLatestPublishModel.PUBLISH_TYPE_NAME_ROLE
             )
