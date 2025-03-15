@@ -31,6 +31,7 @@ class PublishItem():
             "hrox": "NukeStudio Project",
             "hip": "Houdini Scene",
             "hipnc": "Houdini Scene",
+            "hiplc": "Houdini Scene",
             "ma": "Maya Scene",
             "mb": "Maya Scene",
             "fbx": "Motion Builder FBX",
