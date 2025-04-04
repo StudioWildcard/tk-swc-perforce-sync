@@ -75,6 +75,12 @@ class Icons(object):
         self.p4_file_delete_path = os.path.join(self.repo_root, "icons/p4_file_delete.png")
         self.p4_file_delete_icon = QtGui.QIcon(QtGui.QPixmap(self.p4_file_delete_path))
 
+        self.status_success_path = os.path.join(self.repo_root, "icons/status_success.png")
+        self.status_success_icon = QtGui.QIcon(QtGui.QPixmap(self.status_success_path))
+
+        self.status_validate_path = os.path.join(self.repo_root, "icons/status_validate.png")
+        self.status_validate_icon = QtGui.QIcon(QtGui.QPixmap(self.status_validate_path))
+
     def get_icon_path(self, action):
         if action in ["add", "edit", "delete", "move/add"]:
             if action == "edit":
@@ -93,6 +99,17 @@ class Icons(object):
                 return self.p4_file_delete_icon
             else:
                 return self.p4_file_add_icon
+        return None
+
+    def get_sync_pixmap(self, sync_count):
+        if sync_count >= 0:
+            if sync_count == 0:
+                return self.status_success_icon
+            elif sync_count >= 0:
+                return self.status_validate_icon
+            # For any other case (Future update), return the validate icon
+            else:
+                return self.status_validate_icon
         return None
 
 def create_overlayed_user_publish_thumbnail(publish_pixmap, user_pixmap):

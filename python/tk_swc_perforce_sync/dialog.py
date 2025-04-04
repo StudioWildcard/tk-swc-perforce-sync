@@ -176,6 +176,7 @@ class AppDialog(QWidget):
         #################################################
         # Icons:
         self.actions_icons = Icons()
+        self.sync_icons = Icons()
         #################################################
         # hook a helper model tracking status codes so we
         # can use those in the UI
@@ -6364,28 +6365,105 @@ class AppDialog(QWidget):
             else:
                 (model, proxy_model) = self._setup_query_model(app, setting_dict)
 
-            # Add a new tab and its layout to the main tab bar.
+
+            # ------------------------------------------------------------------------------
+            # Add a new tab and its layout to the main tab bar
+            logger.debug(f"[PRESET] Creating tab for preset: {preset_name}")
             tab = QWidget()
             layout = QVBoxLayout(tab)
             layout.setSpacing(0)
             layout.setContentsMargins(0, 0, 0, 0)
             self.ui.entity_preset_tabs.addTab(tab, preset_name)
 
-            # Add a tree view in the tab layout.
+            # Create and configure the tree view
             view = QTreeView(tab)
             layout.addWidget(view)
+            view.setModel(proxy_model)
 
-            # Configure the view.
             view.setEditTriggers(QAbstractItemView.NoEditTriggers)
             view.setProperty("showDropIndicator", False)
             view.setIconSize(QSize(20, 20))
             view.setStyleSheet("QTreeView::item { padding: 6px; }")
             view.setUniformRowHeights(True)
-            view.setHeaderHidden(True)
-            view.setModel(proxy_model)
 
-            # Keep a handle to all the new Qt objects, otherwise the GC may not work.
+            if preset_name == "My Tasks":
+                logger.debug("Special handling for 'My Tasks' preset")
+
+                # Show two columns: Name and To Sync
+                view.setHeaderHidden(False)
+                view.header().setStretchLastSection(False)
+                view.header().setSectionResizeMode(QHeaderView.Stretch)
+                view.setSortingEnabled(True)
+                view.sortByColumn(0, Qt.AscendingOrder)
+
+                # Set column headers
+                source_model = proxy_model.sourceModel()
+                source_model.setHorizontalHeaderLabels(["Name", "To Sync"])
+                # logger.debug(f"[PRESET] Set headers: Name, To Sync")
+
+                row_count = source_model.rowCount()
+                # logger.debug(f"[PRESET] 'My Tasks' row count: {row_count}")
+
+                for row in range(row_count):
+                    # logger.debug(f"------------------------------------------------------------------")
+                    proxy_index = proxy_model.index(row, 0)
+                    if not proxy_index.isValid():
+                        # logger.debug(f"[PRESET] Row {row}: Invalid proxy index")
+                        continue
+
+                    source_index = proxy_model.mapToSource(proxy_index)
+                    if not source_index.isValid():
+                        # logger.debug(f"[PRESET] Row {row}: Invalid source index")
+                        continue
+
+                    # Get item using source_index.model(), not base model
+                    item_model = source_index.model()
+                    item = item_model.itemFromIndex(source_index)
+
+                    if not item:
+                        # logger.debug(f"[PRESET] Row {row}: No item in model")
+                        continue
+
+                    # Extract the Shotgun data and field value from the node item.
+                    (sg_data, entity_data) = model_item_data.get_item_data(item)
+
+                    # logger.debug(">>>>>>>>>>>>>> entity sg_data is: {}".format(sg_data))
+                    # logger.debug(">>>>>>>>>>>>>> entity entity_data is: {}".format(entity_data))
+
+
+                    entity_path, entity_id, entity_type = self._get_entity_info(entity_data)
+                    if not entity_id or not entity_type or not entity_path:
+                        # logger.debug(
+                        #    f"[PRESET] Row {row}: Invalid entity info — Path: {entity_path}, ID: {entity_id}, Type: {entity_type}")
+                        continue
+
+                    # logger.debug(f"[PRESET] Row {row}: Entity Path: {entity_path}")
+                    # logger.debug(f"[PRESET] Row {row}: Entity ID={entity_id}, Type={entity_type}")
+
+                    sync_count = self._get_sync_count_for_entity(entity_path)
+                    # logger.debug(f"[PRESET] Row {row}: Sync count = {sync_count}")
+
+                    # Set value into the second column
+                    if sync_count == 0:
+                        msg = "Up to date"
+                    else:
+                        msg = "{} To Sync".format(sync_count)
+                    desc_item = QStandardItem(str(msg))
+                    sync_icon = self.sync_icons.get_sync_pixmap(sync_count)
+                    if sync_icon:
+                        desc_item.setIcon(sync_icon)
+
+                    source_model.setItem(source_index.row(), 1, desc_item)
+                logger.debug("End of Special handling for 'My Tasks' preset")
+
+            else:
+                view.setHeaderHidden(True)
+                # logger.debug(f"[PRESET] Using default view setup for preset: {preset_name}")
+
+            # Keep references to avoid garbage collection
             self._dynamic_widgets.extend([model, proxy_model, tab, layout, view])
+
+            #-------------------------------------------------------------------------------
 
             if not type_hierarchy:
 
@@ -6590,6 +6668,33 @@ class AppDialog(QWidget):
         # finalize initialization by clicking the home button, but only once the
         # data has properly arrived in the model.
         self._on_home_clicked()
+
+    def _get_sync_count_for_entity(self, key):
+        """
+        Given a ShotGrid entity, return how many files need to be synced for it.
+        Includes debug logging for tracing issues.
+        """
+
+        # logger.debug(f"[SYNC CHECK] Checking entity: PATH={key}")
+
+        try:
+            sync_count = 0
+            key = key.rstrip('/')
+            # fstat_list = self._p4.run_fstat('-Of', key + '/...')
+            fstat_list = self._p4.run_fstat(key + '/...')
+            for i, fstat in enumerate(fstat_list):
+                if fstat:
+                    # logger.debug(f"[SYNC CHECK] fstat {i}: {fstat}")
+                    have_rev = fstat.get('haveRev', "0")
+                    head_rev = fstat.get('headRev', "0")
+                    if self._to_sync(have_rev, head_rev):
+                        sync_count += 1
+
+            return sync_count
+
+        except Exception as e:
+            logger.warning(f"[SYNC CHECK] Exception during sync check for entity path {key}: {e}")
+            return 0
 
     def trigger_search(self, view, proxy_model, search):
         QApplication.processEvents()  # Process all pending GUI events
@@ -7930,11 +8035,11 @@ class AppDialog(QWidget):
         sg_data = self._publish_model.load_data(
             item, child_folders, show_sub_items, publish_filters
         )
-        # logger.info(">>>>>>>>>>>>>>>>>>>>>>> item is {}".format(item))
-        # logger.info(">>>> child_folders is {}".format(child_folders))
-        # logger.info(">>>> show_sub_items is {}".format(show_sub_items))
-        # logger.info(">>>> publish_filters is {}".format(publish_filters))
-        # logger.info(">>>> sg_data is {}".format(sg_data))
+        logger.info(">>>>>>>>>>>>>>>>>>>>>>> item is {}".format(item))
+        logger.info(">>>> child_folders is {}".format(child_folders))
+        logger.info(">>>> show_sub_items is {}".format(show_sub_items))
+        logger.info(">>>> publish_filters is {}".format(publish_filters))
+        logger.info(">>>> sg_data is {}".format(sg_data))
         return sg_data
 
 
