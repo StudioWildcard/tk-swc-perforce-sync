@@ -120,98 +120,8 @@ class SWCTreeView(QTreeView):
     def multi_selection(self):
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
 
+
     def dropEventOriginal(self, event):
-        if event.mimeData().hasUrls():  # Handle external file drops
-            logger.debug("External file drop ...")
-            urls = event.mimeData().urls()
-
-            # Determine the target changelist
-            target_index = self.indexAt(event.pos())
-            target_changelist = target_index.data(QtCore.Qt.UserRole)
-            if target_changelist is None:
-                target_changelist = "default"  # Use "default" if no specific changelist is targeted
-            logger.debug("Target changelist: {}".format(target_changelist))
-
-            # Process each dropped file
-            selected_actions = []
-            for url in urls:
-                if url.isLocalFile():
-                    local_path = url.toLocalFile().replace("\\", "/")
-                    logger.debug("External dropped file: {}".format(local_path))
-
-                    # Check if local_path is in Perforce repository and get its action
-                    try:
-                        fstat_info = self.p4.run_fstat(local_path)
-                        logger.debug("fstat_info: {}".format(fstat_info))
-                        if fstat_info:
-                            fstat_info = fstat_info[0]
-                            sg_item = self.create_sg_item_from_fstat(fstat_info)
-                            action = fstat_info.get("headAction") or fstat_info.get("action") or None
-                            if action:
-                                logger.debug("Original action for file: {} is: {}".format(local_path, action))
-                                if action == "add":
-                                    action = "edit"
-                                    logger.debug("Modified action for file: {} is: {}".format(local_path, action))
-                                selected_actions.append((sg_item, action))
-                            else:
-                                logger.debug("No action found for file: {}".format(local_path))
-                        else:
-                            logger.debug("No fstat info found for file: {}".format(local_path))
-                            sg_item = self.create_sg_item_from_local_path(local_path)
-                            action = "add"
-                            selected_actions.append((sg_item, action))
-                    except Exception as e:
-                        logger.error("Perforce error: {}".format(e))
-            logger.debug("Selected actions: {}".format(selected_actions))
-            # Add file to the changelist
-            try:
-                # Perform the changelist selection operation
-                self.perform_changelist_selection(selected_actions)
-
-            except Exception as e:
-                logger.error("Error adding file to changelist: {}".format(e))
-
-            event.acceptProposedAction()
-        else:
-            # Drop event handling for internal items
-            if event.source() == self:
-                # Retrieve the new parent's data (changelist number)
-                target_index = self.indexAt(event.pos())
-                target_data = target_index.data(Qt.DisplayRole)
-                logger.debug("<<<<<<<  New parent data (changelist number): {}".format(target_data))
-                #change = target_index.data(Qt.ToolTipRole)
-                target_changelist = target_index.data(QtCore.Qt.UserRole)
-                target_changelist = str(target_changelist)
-                logger.debug("<<<<<<<  parent change is: {}".format(target_changelist))
-                #change = 19110
-
-                # Retrieve the source item's data (depot file path)
-                for source_index in self.selectedIndexes():
-                    source_data = source_index.data(Qt.DisplayRole)
-                    source_changelist = source_index.data(QtCore.Qt.UserRole)
-                    source_changelist = str(source_changelist)
-
-                    if source_data:
-                        dragged_file = source_data.split("#")[0]
-                        dragged_file = dragged_file.strip()
-                        logger.debug("<<<<<<<  Source data (depot file): {}".format(dragged_file))
-                        # Add the depot file to the new changelist
-                        logger.debug("Adding dragged file: {} to changelist: {}".format(dragged_file, target_changelist))
-
-                        #res = add_to_change(self.p4, change, dragged_file)
-                        #reopen_res = self.p4.run_reopen('-c {} {}'.format(target_changelist, dragged_file + '@' + source_changelist))
-                        # reopen_res = self.p4.run_fetch("-c", str(target_changelist), dragged_file)
-                        reopen_res = self.p4.run_reopen("-c", target_changelist, dragged_file)
-                        logger.debug("<<<<<<<  Result of reopen: {}".format(reopen_res))
-                        # Submit the file to the target changelist
-                        #submit_res = self.p4.run_submit("-c", target_changelist, dragged_file)
-                        #logger.debug("<<<<<<<  Result of submit: {}".format(submit_res))
-                super().dropEvent(event)
-            else:
-                # Call the base dropEvent implementation
-                super().dropEvent(event)
-
-    def dropEvent(self, event):
         if event.mimeData().hasUrls():  # Handle external file/folder drops
             logger.debug("External file/folder drop detected.")
             urls = event.mimeData().urls()
@@ -317,6 +227,234 @@ class SWCTreeView(QTreeView):
             else:
                 super().dropEvent(event)
 
+    def dropEvent(self, event):
+        """
+        Handles drop events, both for internal item moves and external file/folder drops.
+        """
+        if event.mimeData().hasUrls():  # Handle external file/folder drops
+            logger.debug("External file/folder drop detected.")
+            urls = event.mimeData().urls()
+
+            # Determine the target changelist (initially, might be refined later)
+            target_index = self.indexAt(event.pos())
+            # Get the changelist ID from the item dropped onto
+            initial_target_changelist = target_index.data(QtCore.Qt.UserRole)
+            if initial_target_changelist is None:
+                # If dropped onto empty space or an item without a changelist ID (e.g., header)
+                # default to 'default'. The ChangelistSelection dialog will handle final selection.
+                initial_target_changelist = "default"
+            logger.debug("Initial target changelist based on drop location: {}".format(initial_target_changelist))
+
+            # --- File Processing Logic (using threading) ---
+            selected_actions = []  # List to hold tuples of (sg_item, action)
+            threads = []
+
+            # Define a function to process each file path
+            def process_file(local_path):
+                try:
+                    # Use run_fstat to get Perforce status
+                    fstat_info_list = self.p4.run_fstat(local_path)
+                    logger.debug(f"fstat info for {local_path}: {fstat_info_list}")
+
+                    sg_item = None
+                    action = "add"  # Default action is 'add' for files not in Perforce
+
+                    if fstat_info_list:
+                        fstat_info = fstat_info_list[0]  # Assuming one result per file path
+                        sg_item = self.create_sg_item_from_fstat(fstat_info)
+
+                        # Determine Perforce action ('edit', 'add', 'delete', etc.)
+                        p4_action = fstat_info.get("action") or fstat_info.get("headAction")
+
+                        if p4_action:
+                            logger.debug(f"Original Perforce action for file: {local_path} is: {p4_action}")
+                            # Map Perforce action to desired publish action if needed
+                            if p4_action == "add":
+                                action = "edit"  # Treat 'p4 add' as 'edit' for publishing context
+                                logger.debug(f"Mapped action for file: {local_path} is: {action}")
+                            elif p4_action in ["edit", "integrate", "branch", "move/add"]:
+                                action = "edit"
+                            elif p4_action in ["delete", "move/delete"]:
+                                action = "delete"
+                                logger.warning(f"File {local_path} is marked for delete. Handling as 'delete' action.")
+                            else:
+                                action = p4_action  # Use the action directly if not specifically mapped
+                        else:
+                            # File exists in Perforce but isn't open for action, treat as 'edit'
+                            action = "edit"
+                            logger.debug(
+                                f"No specific action found for existing file: {local_path}. Defaulting to '{action}'.")
+
+                    else:
+                        # File is not in Perforce, create basic sg_item and use 'add' action
+                        logger.debug(f"No fstat info found for file: {local_path}. Treating as new file.")
+                        sg_item = self.create_sg_item_from_local_path(local_path)
+                        action = "add"  # Explicitly 'add' for non-Perforce files
+
+                    # Append the result (sg_item, action) to the shared list (thread-safe append)
+                    # Use a lock if modifying shared list directly, or append to thread-local list first
+                    # For simplicity here, assuming direct append is okay for this example context
+                    if sg_item:
+                        # Ensure sg_item has necessary fields for ChangelistSelection/AppDialog
+                        sg_item['action'] = action  # Store the determined action
+                        selected_actions.append((sg_item, action))
+
+                except Exception as e:
+                    logger.error(f"Error processing file {local_path}: {e}")
+
+            # Helper function to recursively gather files in a folder
+            def gather_files(folder_path):
+                import os
+                file_paths = []
+                for root, _, files in os.walk(folder_path):
+                    for file in files:
+                        # Optionally filter files here (e.g., ignore certain extensions)
+                        file_paths.append(os.path.join(root, file).replace("\\", "/"))
+                return file_paths
+
+            # Process each dropped URL
+            for url in urls:
+                if url.isLocalFile():
+                    local_path = url.toLocalFile().replace("\\", "/")
+                    if os.path.isdir(local_path):
+                        # If it's a folder, gather all files within it
+                        logger.debug(f"Processing dropped folder: {local_path}")
+                        file_paths = gather_files(local_path)
+                        for file_path in file_paths:
+                            thread = threading.Thread(target=process_file, args=(file_path,))
+                            threads.append(thread)
+                            thread.start()
+                    else:
+                        # If it's a single file, process it directly
+                        logger.debug(f"Processing dropped file: {local_path}")
+                        thread = threading.Thread(target=process_file, args=(local_path,))
+                        threads.append(thread)
+                        thread.start()
+
+            # Wait for all file processing threads to complete
+            for thread in threads:
+                thread.join()
+
+            logger.debug(f"Finished processing dropped files. Selected actions: {len(selected_actions)}")
+            # --- End File Processing Logic ---
+
+            if selected_actions:
+                # Show the ChangelistSelection dialog to the user
+                # This dialog handles user choice of changelist and performs P4 operations.
+                try:
+                    # Pass the initially determined target changelist as a suggestion
+                    changelist_selector = ChangelistSelection(
+                        self.p4,
+                        selected_actions=selected_actions,
+                        parent=self.parent,  # Pass AppDialog as parent
+                        # suggested_changelist=initial_target_changelist
+                    )
+                    # We assume ChangelistSelection might emit a signal upon success,
+                    # or we might modify it to return the result.
+                    # Example using a hypothetical signal:
+                    # changelist_selector.files_processed.connect(self.parent.handle_files_processed_signal)
+
+                    # For direct return (less ideal):
+                    # result_data = changelist_selector.exec_() # or show() if non-modal
+                    # if result_data and result_data.get("success"):
+                    #    final_changelist_id = result_data.get("changelist_id")
+                    #    processed_files_data = result_data.get("processed_files")
+                    #    # Now update the parent's model
+                    #    if self.parent and hasattr(self.parent, 'add_dropped_files_to_changelist'):
+                    #        logger.info(f"Updating parent model for changelist {final_changelist_id}")
+                    #        self.parent.add_dropped_files_to_changelist(final_changelist_id, processed_files_data)
+                    #    else:
+                    #        logger.warning("Parent or add_dropped_files_to_changelist method not found.")
+
+                    # Showing the dialog (assuming it handles the rest, including signaling parent)
+                    changelist_selector.show()
+
+                except Exception as e:
+                    logger.error(f"Error during changelist selection/processing: {e}")
+            else:
+                logger.warning("No valid actions determined for dropped files.")
+
+            event.acceptProposedAction()
+
+        # --- Internal Move Logic ---
+        elif event.source() == self:
+            # Handle internal drag and drop (moving items between changelists in the view)
+            target_index = self.indexAt(event.pos())
+            if not target_index.isValid():
+                logger.warning("Internal drop target index is invalid.")
+                event.ignore()
+                return
+
+            # Ensure the drop target is a changelist item (parent node)
+            if target_index.parent().isValid():  # Dropped onto a file, not a changelist
+                # Try getting the parent index
+                target_index = target_index.parent()
+                if not target_index.isValid():
+                    logger.warning("Cannot drop file onto another file. Drop onto a changelist.")
+                    event.ignore()
+                    return
+
+            target_changelist_id = target_index.data(QtCore.Qt.UserRole)
+            if target_changelist_id is None:
+                logger.warning("Internal drop target is not a valid changelist.")
+                event.ignore()
+                return
+
+            target_changelist_id = str(target_changelist_id)
+            logger.debug(f"Internal move target changelist: {target_changelist_id}")
+
+            moved_files_info = []  # To potentially update model later if needed
+
+            # Process each selected file being dragged
+            selected_indexes = self.selectedIndexes()
+            source_files = []
+            for source_index in selected_indexes:
+                # Ensure we only process file items (children), not changelist items (parents)
+                if source_index.parent().isValid():
+                    source_data = source_index.data(Qt.DisplayRole)  # e.g., //depot/file#rev
+                    source_changelist_id = str(source_index.data(QtCore.Qt.UserRole))  # CL of the source item
+
+                    if source_data:
+                        # Extract depot path (remove revision info if present)
+                        dragged_file_depot_path = source_data.split("#")[0].strip()
+                        source_files.append(dragged_file_depot_path)
+                        logger.debug(
+                            f"Preparing to move file: {dragged_file_depot_path} from CL {source_changelist_id} to CL {target_changelist_id}")
+
+            if source_files:
+                # Perform the Perforce 'reopen' command for all files at once
+                try:
+                    # Ensure target changelist exists (p4 change -o needs existing CL or 'default')
+                    # Note: 'default' might need special handling if files are added first.
+                    # 'p4 reopen' moves open files between changelists.
+                    reopen_args = ["-c", target_changelist_id] + source_files
+                    reopen_res = self.p4.run_reopen(*reopen_args)
+                    logger.debug(f"Perforce reopen result: {reopen_res}")
+
+                    # Check result for errors (p4python usually raises exceptions on error)
+                    # If successful, proceed with the default Qt drop event to update the view
+                    super().dropEvent(event)  # Updates the TreeView UI
+
+                    # OPTIONAL: If you need to update the AppDialog's internal _change_dict
+                    # after the move, you would need logic here or in ChangelistSelection
+                    # to signal the parent with the moved files and target CL.
+                    # For example:
+                    # if self.parent and hasattr(self.parent, 'handle_files_moved_signal'):
+                    #    self.parent.handle_files_moved_signal(target_changelist_id, source_files)
+
+                except Exception as e:
+                    logger.error(f"Error during Perforce reopen operation: {e}")
+                    # Don't accept the drop if p4 command failed
+                    event.ignore()
+            else:
+                logger.warning("No valid source files identified for internal move.")
+                event.ignore()
+
+        else:
+            # Handle drops from other sources if necessary, otherwise ignore or call super
+            logger.debug("Drop event from unrecognized source.")
+            super().dropEvent(event)  # Or event.ignore() if only internal/URL drops are allowed
+
     def dragEnterEvent(self, event):
         if event.source() == self:
             event.setDropAction(Qt.MoveAction)
@@ -336,28 +474,49 @@ class SWCTreeView(QTreeView):
     def setFirstColumn(self, i):
         return self.setFirstColumnSpanned(i, self.rootIndex(), True)
 
+
     def create_sg_item_from_fstat(self, fstat_info):
         """
-        Create sg_item
+        Create sg_item from fstat info, ensuring lowercase extension and forward slashes for local_path.
         """
-        sg_item = fstat_info
+        sg_item = fstat_info.copy()  # Create a copy to avoid modifying the original dict
         client_file = fstat_info.get("clientFile", None)
         if client_file:
-            sg_item["path"] = {}
-            sg_item["path"]["local_path"] = client_file
+            # Normalize path separators to forward slashes
+            normalized_path = client_file.replace("\\", "/")  # ADDED
 
+            # Ensure the local path uses a lowercase extension
+            root, ext = os.path.splitext(normalized_path)
+            normalized_path_lower_ext = root + ext.lower()  # MODIFIED
+
+            sg_item["path"] = {}
+            sg_item["path"]["local_path"] = normalized_path_lower_ext  # MODIFIED
+            # Keep original clientFile if needed elsewhere, or remove if only normalized is used
+            # sg_item["original_clientFile"] = client_file
         return sg_item
-    
+
     def create_sg_item_from_local_path(self, local_path):
         """
-        Create sg_item
+        Create sg_item from local path, ensuring lowercase extension and forward slashes.
         """
         sg_item = {}
+        # Normalize path separators to forward slashes
+        normalized_path = local_path.replace("\\", "/")  # ADDED
+
+        # Ensure the local path uses a lowercase extension
+        root, ext = os.path.splitext(normalized_path)
+        normalized_path_lower_ext = root + ext.lower()  # MODIFIED
+
         sg_item["path"] = {}
-        sg_item["path"]["local_path"] = local_path
-        sg_item["depotFile"] = self.get_depot_filepath(local_path)
+        sg_item["path"]["local_path"] = normalized_path_lower_ext  # MODIFIED
+        # Depot path generation might also need review depending on P4/SG setup,
+        # but let's focus on the local_path used for SG lookups first.
+        # Use the fully normalized path when generating depot path too
+        sg_item["depotFile"] = self.get_depot_filepath(normalized_path_lower_ext)  # MODIFIED
 
         return sg_item
+
+
 
     def get_depot_filepath(self, local_path):
 

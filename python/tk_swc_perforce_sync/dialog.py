@@ -711,6 +711,40 @@ class AppDialog(QWidget):
         sg_logger.error("Error message")
         sg_logger.critical("Critical message")
 
+    def add_dropped_files_to_changelist(self, changelist_id, files_data):
+        """Adds processed dropped files to the specified changelist data."""
+        if changelist_id not in self._change_dict:
+            # Handle case where the changelist might not exist yet (e.g., 'default' might need init)
+            # For simplicity, assuming 'default' always exists or is created if needed
+             if changelist_id == 'default' and 'default' not in self._change_dict:
+                 self._get_default_changelists() # Ensure default exists
+             else:
+                logger.error(f"Target changelist '{changelist_id}' not found in internal data.")
+                return
+
+        for file_info in files_data:
+            sg_item = file_info['sg_item']
+            action = file_info['action']
+
+            # Add necessary fields for the pending view model
+            sg_item['action'] = action # Ensure action is set
+            sg_item['headChange'] = changelist_id # Associate with the target changelist
+
+            # Append to the list for that changelist
+            # Avoid duplicates if the file was already somehow in the list
+            depot_file = sg_item.get('depotFile')
+            if depot_file:
+                 is_duplicate = any(item.get('depotFile') == depot_file for item in self._change_dict[changelist_id] if 'depotFile' in item)
+                 if not is_duplicate:
+                      self._change_dict[changelist_id].append(sg_item)
+                 else:
+                      logger.debug(f"Skipping duplicate add for {depot_file} in changelist {changelist_id}")
+            else:
+                 # Handle cases without depotFile if necessary, though unlikely for 'add'
+                 self._change_dict[changelist_id].append(sg_item)
+
+        logger.debug(f"Added {len(files_data)} files to changelist '{changelist_id}' data.")
+
 
     def _get_shotgun_panel_widget(self):
         # Get the current engine
@@ -3071,6 +3105,7 @@ class AppDialog(QWidget):
 
     def _on_column_model_action_groups(self, action):
         selected_actions = []
+        selected_files_to_revert = []
         selected_indexes = self.ui.column_view.selectionModel().selectedRows()
 
         # Define the custom role for "id"
@@ -3106,13 +3141,30 @@ class AppDialog(QWidget):
                                 self._add_log(msg, 2)
                                 selected_actions.append((sg_item, action))
 
+
                             elif action == "revert":
-                                msg = "Revert file {} ...".format(target_file)
-                                self._add_log(msg, 3)
-                                # p4_result = self._p4.run("revert", "-v", target_file)
-                                p4_result = self._p4.run("revert", target_file)
-                                if p4_result:
-                                    self.refresh_publish_data()
+
+                                # Collect files to revert instead of reverting immediately
+
+                                if target_file:
+                                    selected_files_to_revert.append(target_file)
+
+                                    msg = "Preparing to revert file {} ...".format(target_file)
+
+                                    self._add_log(msg, 3)
+        # --- Perform bulk revert after the loop ---
+        if action == "revert" and selected_files_to_revert:
+            try:
+                msg = f"Reverting {len(selected_files_to_revert)} selected file(s)..."
+                self._add_log(msg, 2)
+                # Use argument unpacking (*) to pass all files at once
+                p4_result = self._p4.run("revert", *selected_files_to_revert)
+                logger.debug(f"Bulk revert result: {p4_result}")
+                if p4_result:  # Check if the command was successful (might need adjustment based on p4python output)
+                    self.refresh_publish_data()  # Refresh data once after bulk operation
+            except Exception as e:
+                logger.error(f"Error during bulk revert: {e}")
+                self._add_log(f"Error during bulk revert: {e}", 2)  # Show error in log window
 
         if selected_actions:
             self.perform_changelist_selection(selected_actions)
@@ -7770,8 +7822,9 @@ class AppDialog(QWidget):
 
 
     def _on_publish_model_action(self, action):
-        selected_indexes = self.ui.publish_view.selectionModel().selectedIndexes()
         selected_actions = []
+        selected_files_to_revert = []
+        selected_indexes = self.ui.publish_view.selectionModel().selectedIndexes()
         self._submitted_data_to_publish = []
         for model_index in selected_indexes:
             proxy_model = model_index.model()
@@ -7812,17 +7865,34 @@ class AppDialog(QWidget):
                             self._add_log(msg, 2)
                             selected_actions.append((sg_item, action))
 
+
                         elif action == "revert":
-                            msg = "Revert file {} ...".format(target_file)
-                            self._add_log(msg, 3)
-                            # p4_result = self._p4.run("revert", "-v", target_file)
-                            p4_result = self._p4.run("revert", target_file)
-                            if p4_result:
-                                self.refresh_publish_data()
+
+                            # Collect files to revert instead of reverting immediately
+
+                            if target_file:
+                                selected_files_to_revert.append(target_file)
+
+                                msg = "Preparing to revert file {} ...".format(target_file)
+
+                                self._add_log(msg, 3)
 
         if self._submitted_data_to_publish:
             self._on_fix_list()
 
+        # --- Perform bulk revert after the loop ---
+        if action == "revert" and selected_files_to_revert:
+            try:
+                msg = f"Reverting {len(selected_files_to_revert)} selected file(s)..."
+                self._add_log(msg, 2)
+                # Use argument unpacking (*) to pass all files at once
+                p4_result = self._p4.run("revert", *selected_files_to_revert)
+                logger.debug(f"Bulk revert result: {p4_result}")
+                if p4_result:  # Check if the command was successful (might need adjustment based on p4python output)
+                    self.refresh_publish_data()  # Refresh data once after bulk operation
+            except Exception as e:
+                logger.error(f"Error during bulk revert: {e}")
+                self._add_log(f"Error during bulk revert: {e}", 2)  # Show error in log window
         if selected_actions:
             self.perform_changelist_selection(selected_actions)
         #logger.debug(">>>>>>>>>>  publish_model.async_refresh...")
