@@ -666,11 +666,11 @@ class Ui_Dialog(object):
         self.navigation_next.setToolTip(QApplication.translate("Dialog", "<i>Go forward</i> in the folder file_history.", None, QApplication.UnicodeUTF8))
         self.navigation_next.setAccessibleName(QApplication.translate("Dialog", "navigation_next", None, QApplication.UnicodeUTF8))
         # --- New Tooltips ---
-        self.refresh_button.setToolTip(QApplication.translate("Dialog", "Refresh the current view.", None, QApplication.UnicodeUTF8))
+        self.refresh_button.setToolTip(QApplication.translate("Dialog", "Refresh", None, QApplication.UnicodeUTF8))
         self.refresh_button.setAccessibleName(QApplication.translate("Dialog", "refresh_button", None, QApplication.UnicodeUTF8))
-        self.get_latest_button.setToolTip(QApplication.translate("Dialog", "Sync selected files.", None, QApplication.UnicodeUTF8))
+        self.get_latest_button.setToolTip(QApplication.translate("Dialog", "Get Latest", None, QApplication.UnicodeUTF8))
         self.get_latest_button.setAccessibleName(QApplication.translate("Dialog", "get_latest_button", None, QApplication.UnicodeUTF8))
-        self.submit_button.setToolTip(QApplication.translate("Dialog", "Submit selected files to Perforce.", None, QApplication.UnicodeUTF8))
+        self.submit_button.setToolTip(QApplication.translate("Dialog", "Submit", None, QApplication.UnicodeUTF8))
         self.submit_button.setAccessibleName(QApplication.translate("Dialog", "submit_button", None, QApplication.UnicodeUTF8))
         # --- End New Tooltips ---
         self.entity_preset_tabs.setToolTip(QApplication.translate("Dialog", "This area shows <i>ShotGrid objects</i> such as Shots or Assets, grouped into sections. ", None, QApplication.UnicodeUTF8))
