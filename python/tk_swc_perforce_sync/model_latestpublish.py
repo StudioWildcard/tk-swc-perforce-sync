@@ -163,6 +163,9 @@ class SgLatestPublishModel(ShotgunModel):
                     fields = ["path"]
                     entity_type = sg_data.get('type', None)
                     entity_path = app.sgtk.paths_from_entity(entity_type, entity_id)
+                    logger.info(f"model_latestpublish: entity_type is: {entity_type}")
+                    logger.info(f"model_latestpublish: entity_id is: {entity_id}")
+                    logger.info(f"model_latestpublish: entity_path is: {entity_path}")
                     """
                     data_type = sg_data.get("type", None)
                     # logger.debug("model_latestpublish: data_type is: {}".format(data_type))

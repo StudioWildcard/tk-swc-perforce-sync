@@ -212,16 +212,21 @@ class SgPublishHistoryDelegate(shotgun_view.EditSelectedWidgetDelegate):
 
         sg_item = shotgun_model.get_sg_data(model_index)
 
+        if not sg_item:
+            return
+
+
         # First do the header - this is on the form
         # v004 (2014-02-21 12:34)
 
         header_str = ""
-        header_str += "<b style='color:#2C93E2'>Version %03d</b>" % (
-            sg_item.get("version_number") or 0
-        )
+        if sg_item:
+            header_str += "<b style='color:#2C93E2'>Version %03d</b>" % (
+                sg_item.get("version_number", 0) or 0
+            )
 
         try:
-            created_unixtime = sg_item.get("created_at")
+            created_unixtime = sg_item.get("created_at", 0)
             date_str = datetime.datetime.fromtimestamp(created_unixtime).strftime(
                 "%Y-%m-%d %H:%M"
             )
@@ -230,9 +235,9 @@ class SgPublishHistoryDelegate(shotgun_view.EditSelectedWidgetDelegate):
             pass
 
         # set the little description bit next to the artist icon
-        desc_str = sg_item.get("description") or "No Description Given"
+        desc_str = sg_item.get("description", "No Description Given") or "No Description Given"
         # created_by is set to None if the user has been deleted.
-        if sg_item.get("created_by") and sg_item["created_by"].get("name"):
+        if sg_item.get("created_by", "") and sg_item["created_by"].get("name"):
             author_str = sg_item["created_by"].get("name")
         else:
             author_str = "Unspecified User"

@@ -201,32 +201,29 @@ class Ui_Dialog(object):
 
         # --- New Buttons ---
         self.refresh_button = QToolButton(self.middle_area_widget)
-        self.refresh_button.setMinimumSize(QSize(0, 26))
+        self.refresh_button.setMinimumSize(QSize(40, 40))
+        self.refresh_button.setMaximumSize(QSize(40, 40))
         icon_refresh = QIcon()
-        icon_refresh.addPixmap(QPixmap(":/res/refresh_active_20.png"), QIcon.Normal, QIcon.Off) # Placeholder icon
+        icon_refresh.addPixmap(QPixmap(":/res/refresh.png"), QIcon.Normal, QIcon.Off) # Placeholder icon
         self.refresh_button.setIcon(icon_refresh)
-        self.refresh_button.setCheckable(True)
-        self.refresh_button.setChecked(True)
         self.refresh_button.setObjectName("refresh_button")
         self.horizontalLayout_2.addWidget(self.refresh_button)
 
         self.get_latest_button = QToolButton(self.middle_area_widget)
-        self.get_latest_button.setMinimumSize(QSize(0, 26))
+        self.get_latest_button.setMinimumSize(QSize(40, 40))
+        self.get_latest_button.setMaximumSize(QSize(40, 40))
         icon_get_latest = QIcon()
-        icon_get_latest.addPixmap(QPixmap(":/res/get_latest_active_20.png"), QIcon.Normal, QIcon.Off) # Placeholder icon
+        icon_get_latest.addPixmap(QPixmap(":/res/get_latest.png"), QIcon.Normal, QIcon.Off) # Placeholder icon
         self.get_latest_button.setIcon(icon_get_latest)
-        self.get_latest_button.setCheckable(True)
-        self.get_latest_button.setChecked(True)
         self.get_latest_button.setObjectName("get_latest_button")
         self.horizontalLayout_2.addWidget(self.get_latest_button)
 
         self.submit_button = QToolButton(self.middle_area_widget)
-        self.submit_button.setMinimumSize(QSize(0, 26))
+        self.submit_button.setMinimumSize(QSize(40, 40))
+        self.submit_button.setMaximumSize(QSize(40, 40))
         icon_submit = QIcon()
-        icon_submit.addPixmap(QPixmap(":/res/submit_active_20.png"), QIcon.Normal, QIcon.Off) # Placeholder icon
+        icon_submit.addPixmap(QPixmap(":/res/submit.png"), QIcon.Normal, QIcon.Off) # Placeholder icon
         self.submit_button.setIcon(icon_submit)
-        self.submit_button.setCheckable(True)
-        self.submit_button.setChecked(True)
         self.submit_button.setObjectName("submit_button")
         self.horizontalLayout_2.addWidget(self.submit_button)
         # --- End New Buttons ---
@@ -437,7 +434,6 @@ class Ui_Dialog(object):
         self.sync_files.setMinimumSize(QSize(100, 26))
         self.sync_files.setMaximumSize(QSize(100, 26))
         self.sync_files.setObjectName("sync_files")
-        self.sync_files.hide()
 
         self.sync_parents = QToolButton(self.middle_area_widget)
         sizePolicy = QSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
@@ -448,7 +444,6 @@ class Ui_Dialog(object):
         self.sync_parents.setMinimumSize(QSize(100, 26))
         self.sync_parents.setMaximumSize(QSize(100, 26))
         self.sync_parents.setObjectName("sync_files")
-        self.sync_parents.hide()
 
         self.submit_files = QToolButton(self.middle_area_widget)
         sizePolicy = QSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
@@ -459,7 +454,8 @@ class Ui_Dialog(object):
         self.submit_files.setMinimumSize(QSize(100, 26))
         self.submit_files.setMaximumSize(QSize(100, 26))
         self.submit_files.setObjectName("publish_files")
-        self.submit_files.hide()
+        # Todo do we need to hide this? And move submit to the menu area?
+        # self.submit_files.hide()
 
         self.progress = QProgressBar(self.middle_area_widget)
         self.progress.setMaximumHeight(20)
@@ -668,7 +664,7 @@ class Ui_Dialog(object):
         # --- New Tooltips ---
         self.refresh_button.setToolTip(QApplication.translate("Dialog", "Refresh the current view.", None, QApplication.UnicodeUTF8))
         self.refresh_button.setAccessibleName(QApplication.translate("Dialog", "refresh_button", None, QApplication.UnicodeUTF8))
-        self.get_latest_button.setToolTip(QApplication.translate("Dialog", "Sync selected files.", None, QApplication.UnicodeUTF8))
+        self.get_latest_button.setToolTip(QApplication.translate("Dialog", "Get the latest version of selected files.", None, QApplication.UnicodeUTF8))
         self.get_latest_button.setAccessibleName(QApplication.translate("Dialog", "get_latest_button", None, QApplication.UnicodeUTF8))
         self.submit_button.setToolTip(QApplication.translate("Dialog", "Submit selected files to Perforce.", None, QApplication.UnicodeUTF8))
         self.submit_button.setAccessibleName(QApplication.translate("Dialog", "submit_button", None, QApplication.UnicodeUTF8))
