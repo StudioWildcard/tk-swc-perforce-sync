@@ -1873,21 +1873,23 @@ class AppDialog(QWidget):
         msg = "\n <span style='color:#2C93E2'>Refreshing file history model ...</span> \n"
         self._add_log(msg, 2)
         self._publish_file_history_model.hard_refresh()
-        msg = "\n <span style='color:#2C93E2'>Refreshing type model ...</span> \n"
-        self._add_log(msg, 2)
-        self._publish_type_model.hard_refresh()
-        msg = "\n <span style='color:#2C93E2'>Refreshing publish model ...</span> \n"
-        self._add_log(msg, 2)
-        self._publish_model.hard_refresh()
+        #msg = "\n <span style='color:#2C93E2'>Refreshing type model ...</span> \n"
+        #self._add_log(msg, 2)
+        #self._publish_type_model.hard_refresh()
+        #msg = "\n <span style='color:#2C93E2'>Refreshing publish model ...</span> \n"
+        #self._add_log(msg, 2)
+        #self._publish_model.hard_refresh()
 
         msg = "\n <span style='color:#2C93E2'>Refresh entity presets and sync count ...</span> \n"
         self._add_log(msg, 2)
         # for p in self._entity_presets:
         #    self._entity_presets[p].model.hard_refresh()
         self.refresh_entity_preset_tabs()
-        msg = "\n <span style='color:#2C93E2'>Finally, clicking on the Home button...</span> \n"
+
+        msg = "\n <span style='color:#2C93E2'>Reloading view for current selection...</span> \n"
         self._add_log(msg, 2)
-        self._on_home_clicked()
+        # self._on_home_clicked()
+        self._on_treeview_item_selected()
         #self._load_entity_presets()
         #self._recreate_entity_presets()
 
@@ -2205,13 +2207,15 @@ class AppDialog(QWidget):
         while sync_thread.is_alive():
             QCoreApplication.processEvents()
 
-        self._add_log(
-            "\n <span style='color:#2C93E2'>Sync complete for current selection.</span> \n", 2)
+        self._after_syncing_operations()
 
-        self._add_log("\n <span style='color:#2C93E2'>Reloading data...</span> \n", 2)
+        #self._add_log(
+        #    "\n <span style='color:#2C93E2'>Sync complete for current selection.</span> \n", 2)
+
+        #self._add_log("\n <span style='color:#2C93E2'>Reloading data...</span> \n", 2)
         #self.refresh_publish_data()
         # self.refresh_entity_preset_tabs()
-        self._add_log("\n <span style='color:#2C93E2'>Reloading data is complete.</span> \n", 2)
+        #self._add_log("\n <span style='color:#2C93E2'>Reloading data is complete.</span> \n", 2)
 
 
     def _get_selected_entity_path_info(self):
@@ -2694,19 +2698,21 @@ class AppDialog(QWidget):
                     selected_row_data = self._get_pending_data_from_source(source_index)
                     action = self._get_action_data_from_source(source_index)
                     change = self._get_change_data_from_source(source_index)
-                    if selected_row_data and "#" in selected_row_data:
+                    #if selected_row_data and "#" in selected_row_data:
+                    if selected_row_data:
                         target_file = selected_row_data.split("#")[0]
                         target_file = target_file.strip()
+                        logger.debug("Revert: Target file {target_file}")
                         selected_files_to_revert.append(target_file)
-                        if action in ["add"]:
-                            selected_files_to_delete.append((change,target_file))
+                        #if action in ["add"]:
+                        #    selected_files_to_delete.append((change,target_file))
 
                 except Exception as e:
                     logger.debug("Error processing selection: {}".format(e))
             if selected_files_to_revert:
                 # Convert list of files into a string, to show in the confirmation dialog
                 files_str = "\n".join(selected_files_to_revert)
-
+                logger.debug("Revert: files_str {files_str}")
                 # Show confirmation dialog
                 reply = QMessageBox.question(self, 'Confirmation',
                                              f"Are you sure you want to revert the following files?\n\n{files_str}",
@@ -2994,10 +3000,166 @@ class AppDialog(QWidget):
         return None
 
     def _populate_column_view_widget(self):
+        """
+        Populates the column view using self._sg_data merged with self._fstat_dict.
+        """
+        self._column_view_dict = {}
+        self._standard_item_dict = {}
+
+        logger.debug("Setting up Column View table ...")
+        self._setup_column_view() # Resets the model
+
+        # Use self._sg_data as the primary source, augmented by self._fstat_dict
+        logger.debug("Preparing data for Column View...")
+        combined_sg_data = []
+        processed_keys = set() # Keep track of fstat keys processed via sg_data merge
+        """
+        logger.info("_populate_column_view_widget self._sg_data".format(self._sg_data))
+        for sg_item in self._sg_data:
+            logger.info("sg_item: {}".format(sg_item))
+            #logger.info("--------------------------------------")
+            #path = sg_item.get("path", {})
+            #logger.info("local_path: {}".format(path.get("local_path", None)))
+            #logger.info("headRev: {}".format(sg_item.get("headRev", None)))
+            #logger.info("haveRev: {}".format(sg_item.get("haveRev", None)))
+        logger.info("_populate_column_view_widget self._fstat_dict")
+        for key, val  in self._fstat_dict.items():
+            logger.info("key: {} val : {}".format(key, val))
+        """
+        # 1. Process data from self._sg_data (ShotGrid publishes)
+        if self._sg_data:
+            for sg_item in self._sg_data:
+                if not sg_item: continue
+                local_path = sg_item.get("path", {}).get("local_path")
+                key = None # Key to match with _fstat_dict
+                if local_path:
+                    # Create a key consistent with _fstat_dict (path + #rev)
+                    base_key = self._create_key(local_path) # Creates lowercased, no-slash key
+                    # Try to get revision from SG data, fallback to fstat if needed later
+                    version_number = sg_item.get("version_number")
+                    head_rev_sg = sg_item.get("headRev") # Might be added by _get_perforce_data previously
+
+                    if version_number is not None:
+                        key = f"{base_key}#{int(version_number)}"
+                    elif head_rev_sg: # Use headRev from SG item if version_number missing
+                         key = f"{base_key}#{head_rev_sg}"
+                    # else: key remains None, will try to match fstat later if possible
+
+                # Merge with fstat data if a key was determined
+                fstat_data = self._fstat_dict.get(key, {}) if key else {}
+                # Prioritize ShotGrid fields over fstat fields where they overlap
+                merged_item = {**fstat_data, **sg_item}
+
+
+                if "revision" in fstat_data:
+                    merged_item["revision"] = fstat_data["revision"]
+
+                # Ensure essential fields for column view are present
+                merged_item.setdefault("Published", True) # Assume published if from SG data
+
+                # Try to determine a reliable unique key for the dictionaries
+                item_id = merged_item.get("id")
+                item_key = item_id if item_id else key # Use SG id if available, else fstat key
+
+                if item_key: # Only add if we have a reasonable key
+                    combined_sg_data.append(merged_item)
+                    if key: # Mark the fstat key as processed if we used it
+                        processed_keys.add(key)
+                # else: logger.warning(f"Could not determine key for SG item: {sg_item.get('code')}")
+
+
+        # 2. Process data *only* in self._fstat_dict (Perforce files not in SG data)
+        for key, fstat_item in self._fstat_dict.items():
+            if key not in processed_keys:
+                # This item exists in Perforce but wasn't in the SG query result
+                # Ensure it has necessary fields for the column view
+                if not fstat_item.get("Published"): # Only add if not marked as published
+                    # Add necessary defaults if missing from fstat
+                    file_path = fstat_item.get("clientFile")
+                    if file_path:
+                        fstat_item.setdefault("name", os.path.basename(file_path))
+                        fstat_item.setdefault("path", {"local_path": file_path})
+                        # 'revision' is already set in _get_perforce_data
+                        # 'code' is already set in _fix_fstat_dict
+                        fstat_item.setdefault("type", "PublishedFile") # Assume this type?
+                        # 'sg_status_list' is already set in _fix_fstat_dict
+                        # 'depot_file_type' is already set in _fix_fstat_dict
+                        fstat_item.setdefault("action", fstat_item.get("headAction"))
+
+                        # Use the fstat key as the primary key for the dictionaries
+                        item_key = key
+                        combined_sg_data.append(fstat_item)
+                    # else: logger.warning(f"fstat item {key} missing clientFile")
+
+
+
+        length = len(combined_sg_data)
+        # logger.debug(f"Combined data length: {length}")
+        # logger.debug(f"Sample combined data item: {combined_sg_data[0] if combined_sg_data else 'None'}")
+
+        if combined_sg_data and length > 0:
+            msg = "\n <span style='color:#2C93E2'>Populating the Column View with {} files. Please wait...</span> \n".format(
+                length)
+            self._add_log(msg, 2)
+
+            # --- (Optional) Get Perforce file size ---
+            # This might be redundant if fstat already has size. Verify if needed.
+            # logger.debug("Getting Perforce file size...")
+            # combined_sg_data = self._get_perforce_size(combined_sg_data) # Pass combined data
+
+            # logger.debug("Populating Column View table...")
+
+            # --- Iterate over combined_sg_data ---
+            for sg_item in combined_sg_data:
+                # Determine the key (prefer SG ID, fallback to fstat key)
+                item_id = sg_item.get("id")
+                item_key = item_id # Default to SG ID
+
+                if not item_key: # Fallback if no SG ID
+                    local_path = sg_item.get("path", {}).get("local_path")
+                    head_rev = sg_item.get("headRev", "0")
+                    if local_path:
+                         base_key = self._create_key(local_path)
+                         item_key = f"{base_key}#{head_rev}" # Use fstat-style key
+                    else:
+                         # Fallback key if path is also missing (less ideal)
+                         item_key = f"item_{sg_item.get('depotFile', 'unknown')}_{head_rev}"
+
+                # logger.debug(f"Processing item with key: {item_key}")
+
+                # --- Pass sg_item directly to _get_column_data ---
+                new_sg_item, sg_list = self._get_column_data(sg_item)
+
+                # logger.debug(">>> original sg_item: {}".format(sg_item))
+                # logger.debug(">>> new sg_item: {}".format(new_sg_item))
+
+                # --- Use item_key ---
+                if item_key not in self._column_view_dict and new_sg_item:
+                    self._column_view_dict[item_key] = new_sg_item
+                # logger.debug(">>> sg_list: {}".format(sg_list))
+                if sg_list:
+                    # --- Use item_key ---
+                    self._standard_item_dict[item_key] = sg_list
+
+            #logger.debug(">>> self._column_view_dict: {}".format(self._column_view_dict))
+            #logger.debug(">>> self._standard_item_dict: {}".format(self._standard_item_dict))
+
+            self._get_grouped_column_view_data() # Uses the dicts populated above
+            self._get_publish_icons() # Attempt to get icons based on current data
+            self._set_column_group() # Populates the view model
+            logger.debug("Column View population complete.")
+
+        else:
+             msg = "\n <span style='color:#FFD700'>No files found to display in Column View for the current selection.</span> \n"
+             self._add_log(msg, 2)
+             # Ensure the view is cleared if no data
+             self.column_view_model.setRowCount(0) # Clear the view model directly
+
+    def _populate_column_view_widget_original(self):
         #self._publish_model.hard_refresh()
         self._column_view_dict = {}
         self._standard_item_dict = {}
-        
+
         logger.debug("Setting up Column View table ...")
         self._setup_column_view()
         logger.debug("Getting Perforce data...")
@@ -3014,6 +3176,7 @@ class AppDialog(QWidget):
             logger.debug("Populating Column View table...")
 
             logger.debug("Updating Column View is complete")
+
             for sg_item in self._perforce_sg_data:
                 # logger.debug("------------------------------------------")
                 #for k, v in sg_item.items():
@@ -4096,7 +4259,54 @@ class AppDialog(QWidget):
         for key, value in sg_item.items():
             msg = "{}: {}".format(key, value)
             logger.debug(msg)
+
     def _get_publish_icons(self):
+        """
+        Get the icons for the publish view based on the data prepared for the column view.
+        Attempts to retrieve icons from the SgLatestPublishModel.
+        """
+        self._publish_icons = {}
+
+
+        publish_model = self._publish_model # Direct reference to the source model
+
+        if not publish_model:
+            logger.warning("Cannot get publish icons: SgLatestPublishModel not available.")
+            return
+
+        # Create a mapping from ShotGrid publish ID to source model index
+        id_to_source_index = {}
+        for row in range(publish_model.rowCount()):
+             source_index = publish_model.index(row, 0)
+             item = publish_model.itemFromIndex(source_index)
+             if item:
+                 sg_item = item.get_sg_data()
+                 if sg_item:
+                     item_id = sg_item.get("id")
+                     if item_id:
+                         id_to_source_index[item_id] = source_index
+
+        # Iterate through our column view data and find matching icons
+        for item_key, sg_item_col_view in self._column_view_dict.items():
+            # Try to find the corresponding item in the publish_model using the ID
+            item_id = sg_item_col_view.get("id") # ID should be present from the merge
+            source_index = id_to_source_index.get(item_id) if item_id else None
+
+            if source_index:
+                item = publish_model.itemFromIndex(source_index)
+                if item:
+                    icon = item.icon()
+                    # Check if icon is valid and not null before storing
+                    if icon and not icon.isNull():
+                         # Use the item_key used in _populate_column_view_widget
+                         self._publish_icons[item_key] = icon
+                         # logger.debug(f"Found icon for item key {item_key} (ID: {item_id})")
+            # else:
+                 # logger.debug(f"Could not find matching item in publish_model for key {item_key} (ID: {item_id})")
+
+        logger.debug(f"Collected {len(self._publish_icons)} icons.")
+
+    def _get_publish_icons_original(self):
         """
         Get the icons for the publish view.
         """
@@ -5605,13 +5815,13 @@ class AppDialog(QWidget):
             try:
                 source_index = self._pending_view_model.mapToSource(selected_index)
                 change = self._get_change_data_from_source(source_index)
-                # logger.debug("-----------------------------------------------")
-                # logger.debug(">>>>>>>>>>> change:{}".format(change))
+                logger.debug("-----------------------------------------------")
+                logger.debug(">>>>>>>>>>> change:{}".format(change))
                 change_key = str(change)
                 children = self._change_dict.get(change_key, None)
-                #logger.debug(">>>>>>>>>>>change dict:")
-                #for k, v in self._change_dict.items():
-                #    logger.debug("Change:{} values:{}".format(k, v))
+                logger.debug(">>>>>>>>>>>change dict:")
+                for k, v in self._change_dict.items():
+                    logger.debug("Change:{} values:{}".format(k, v))
 
                 if children:
                     for sg_item in children:
@@ -5638,7 +5848,9 @@ class AppDialog(QWidget):
 
             except Exception as e:
                 logger.debug("Error getting file info: {}".format(e))
-
+        logger.debug(">>>>>>>>>>>_submit_widget_dict dict:")
+        for k, v in self._submit_widget_dict.items():
+            logger.debug("Change:{} values:{}".format(k, v))
         return change_sg_item
 
     def _extract_file_info(self, target_file):
@@ -5851,7 +6063,46 @@ class AppDialog(QWidget):
             msg = "\n <span style='color:#2C93E2'>No need to publish any file</span> \n"
             self._add_log(msg, 2)
 
+
     def get_entity_from_sg_item(self, sg_item):
+        # Check if the filepath leads to a valid shotgrid entity
+        filepath = sg_item.get("path", {}).get("local_path", "N/A")  # Get the path safely
+        #logger.debug(f"get_entity_from_sg_item: Processing path: {filepath}")
+        #logger.debug(f"get_entity_from_sg_item: Input sg_item: {sg_item}")  # Log the full input
+
+        entity, published_file = None, None  # Initialize
+
+        # --- Log before calling check_validity_by_published_file ---
+        #logger.debug(f"get_entity_from_sg_item: Attempting check_validity_by_published_file...")
+        try:
+            # Assuming check_validity_by_published_file is imported or available
+            entity, published_file = check_validity_by_published_file(sg_item)
+            logger.debug(
+                f"get_entity_from_sg_item: check_validity_by_published_file result - Entity: {entity}, PublishedFile: {published_file}")
+        except Exception as e:
+            logger.error(f"get_entity_from_sg_item: Error during check_validity_by_published_file: {e}", exc_info=True)
+
+        if not entity:
+            # --- Log before calling check_validity_by_path_parts ---
+            logger.debug(
+                f"get_entity_from_sg_item: PublishedFile check failed or returned no entity. Attempting check_validity_by_path_parts...")
+            try:
+                # Assuming check_validity_by_path_parts is imported or available
+                entity, published_file = check_validity_by_path_parts(swc_fw, sg_item)  # Pass framework if needed
+                logger.debug(
+                    f"get_entity_from_sg_item: check_validity_by_path_parts result - Entity: {entity}, PublishedFile: {published_file}")
+            except Exception as e:
+                logger.error(f"get_entity_from_sg_item: Error during check_validity_by_path_parts: {e}", exc_info=True)
+
+        # --- Log the final result ---
+        if entity:
+            logger.info(f"get_entity_from_sg_item: Successfully found Entity: {entity} for path: {filepath}")
+        else:
+            logger.warning(f"get_entity_from_sg_item: Failed to find Entity for path: {filepath}")
+
+        return entity, published_file
+
+    def get_entity_from_sg_item_original(self, sg_item):
         # Check if the filepath leads to a valid shotgrid entity
         entity, published_file = check_validity_by_published_file(sg_item)
         if not entity:
@@ -6273,13 +6524,35 @@ class AppDialog(QWidget):
             # self._get_perforce_summary()
 
             if self.main_view_mode == self.MAIN_VIEW_COLUMN:
-                # self._populate_column_view_widget()
-                self._set_thump_view_mode()
+                self._populate_column_view_widget()
+                # self._set_thump_view_mode()
                 # time.sleep(1)
                 # self._set_column_view_mode()
 
             msg = "\n <span style='color:#2C93E2'>Reloading data is complete</span> \n"
             self._add_log(msg, 2)
+
+    def _after_syncing_operations(self ):
+        msg = "\n <span style='color:#2C93E2'>Syncing files is complete</span> \n"
+        self._add_log(msg, 2)
+        msg = "\n <span style='color:#2C93E2'>Reloading data ...</span> \n"
+        self._add_log(msg, 2)
+        self._status_model.hard_refresh()
+        self._publish_file_history_model.hard_refresh()
+        # self._publish_type_model.hard_refresh()
+        self._publish_model.hard_refresh()
+        # for p in self._entity_presets:
+        #    self._entity_presets[p].model.hard_refresh()
+        self._setup_file_details_panel([])
+        # self._get_perforce_summary()
+
+        if self.main_view_mode == self.MAIN_VIEW_COLUMN:
+            self._update_perforce_data()
+            self._populate_column_view_widget()
+            #self._set_thump_view_mode()
+            #self._set_column_view_mode()
+            # time.sleep(1)
+            # self._set_column_view_mode()
 
 
     def _sync_entity_parents(self):
@@ -8330,7 +8603,13 @@ class AppDialog(QWidget):
         Slot triggered when someone changes the selection in a treeview.
         """
         #logger.debug("view_mode is: {}".format(self.main_view_mode))
+
         self._fstat_dict = {}
+        #return_to_column_view_flag = False
+        #if self.main_view_mode == self.MAIN_VIEW_COLUMN:
+        #    return_to_column_view_flag = True
+        #    self._set_thump_view_mode()
+
         self._entity_data, item = self._reload_treeview()
 
         # logger.debug(">>>>>>>>>>1 In _on_treeview_item_selected entity_data is: {}".format(self._entity_data))
@@ -8354,8 +8633,11 @@ class AppDialog(QWidget):
         self.print_publish_data()
 
         #logger.debug("main_view_mode is: {}".format(self.main_view_mode))
+        #if return_to_column_view_flag:
         if self.main_view_mode == self.MAIN_VIEW_COLUMN:
-            self._populate_column_view_widget()
+            self._set_column_view_mode()
+            return_to_column_view_flag = False
+            # self._populate_column_view_widget()
         if self.main_view_mode == self.MAIN_VIEW_SUBMITTED:
             self._populate_submitted_widget()
 
@@ -8366,8 +8648,51 @@ class AppDialog(QWidget):
 
         # self. _clean_sg_data()
 
-
     def get_current_sg_data(self):
+        """
+        Populates self._sg_data with ShotGrid publish data from the source model,
+        filtering out items marked for deletion.
+        """
+        total_file_count = 0
+        self._sg_data = []
+        # self._submitted_data_to_publish = [] # This seems unrelated here, consider removing or moving
+        try:
+            model = self._publish_model  # Use the source model directly
+            # logger.debug(">>>>>>>>>> In get_current_sg_data model.rowCount() is {}".format(model.rowCount()))
+            if model.rowCount() > 0:
+                items_to_keep = []
+
+                for row in range(model.rowCount()):
+                    source_index = model.index(row, 0)  # Index from the source model
+                    item = model.itemFromIndex(source_index)
+
+                    if not item: continue  # Skip if item is somehow None
+
+                    is_folder = item.data(SgLatestPublishModel.IS_FOLDER_ROLE)
+                    if not is_folder:
+                        total_file_count += 1
+                        sg_item = item.get_sg_data()  # Get data directly from source item
+                        if not sg_item: continue  # Skip if no sg_data
+
+                        action = sg_item.get("action") or sg_item.get("headAction") or None
+
+                        if action and action in ["delete"]:
+                            # logger.debug(f"Skipping item marked for deletion: {sg_item.get('code')}")
+                            pass  # Skip this item
+                        else:
+                            # Keep this item's data
+                            items_to_keep.append(sg_item)
+                    # else: Folder item, ignore for self._sg_data
+
+
+                self._sg_data = items_to_keep
+                # logger.debug(f"Kept {len(self._sg_data)} non-deleted items for self._sg_data.")
+
+        except Exception as e:
+            logger.error(f"Error in get_current_sg_data: {e}", exc_info=True)
+            self._sg_data = []  # Ensure it's reset on error
+
+    def get_current_sg_data_original(self):
         total_file_count = 0
         self._sg_data = []
         self._submitted_data_to_publish = []

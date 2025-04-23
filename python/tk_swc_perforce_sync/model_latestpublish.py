@@ -572,9 +572,16 @@ class SgLatestPublishModel(ShotgunModel):
         """
         app = sgtk.platform.current_bundle()
 
+
+
         # First, let the filter_publishes hook have a chance to filter the list
         # of publishes:
         sg_data_list = utils.filter_publishes(app, sg_data_list)
+
+        # In _before_data_processing, near the start
+        #logger.info("Raw sg_data_list from ShotGrid:")
+        #if sg_data_list and len(sg_data_list)>0:
+        #    logger.info(sg_data_list[0])
 
         # filter the shotgun data so that we only return the latest publish for each file.
         # also perform aggregate computations and push those summaries into the associated
@@ -674,5 +681,11 @@ class SgLatestPublishModel(ShotgunModel):
         # tell the type model to reshuffle and reformat itself
         # based on the types contained in this search
         self._publish_type_model.set_active_types(type_id_aggregates)
+
+
+        #logger.info("Filtered new_sg_data passed to model:")
+        #if sg_data_list and len(sg_data_list) > 0:
+        #    logger.info(new_sg_data[0])
+
 
         return new_sg_data

@@ -86,7 +86,7 @@ class SubmitChangelistWidget(QDialog):
 
         # File Table
         self.files_label = QLabel('Files to Submit:')
-        self.files_table_widget = QTableWidget(0, 10)  # Adjusted for 10 columns
+        self.files_table_widget = QTableWidget(0, 11)  # Adjusted for 11 columns
         self.files_table_widget.setHorizontalHeaderLabels(
             ['', 'File', 'In Folder', 'Resolve Status', 'Type', 'Pending Action', 'Changelist', 'Entity Name',
              'Entity ID', 'Context', 'Comment']
@@ -111,31 +111,21 @@ class SubmitChangelistWidget(QDialog):
 
         # Buttons
         self.select_all_button = QPushButton('Select All')
-        #self.select_all_button.setFixedWidth(100)
-        #self.select_all_button.setFixedHeight(22.5)
         self.select_all_button.clicked.connect(self.select_all)
 
         self.select_none_button = QPushButton('Select None')
-        #self.select_none_button.setFixedWidth(100)
-        #self.select_none_button.setFixedHeight(22.5)
         self.select_none_button.clicked.connect(self.select_none)
 
         self.submit_button = QPushButton('Submit')
         self.submit_button.setToolTip('Submit the selected files in the changelist')
-        #self.submit_button.setFixedWidth(100)
-        #self.submit_button.setFixedHeight(22.5)
         self.submit_button.clicked.connect(self.submit_changelist)
 
         self.save_button = QPushButton('Save')
         self.save_button.setToolTip('Save the changelist description')
-        #self.save_button.setFixedWidth(100)
-        #self.save_button.setFixedHeight(22.5)
         self.save_button.clicked.connect(self.save_changelist)
 
         self.cancel_button = QPushButton('Cancel')
         self.cancel_button.setToolTip('Cancel the operation')
-        #self.cancel_button.setFixedWidth(100)
-        #self.cancel_button.setFixedHeight(22.5)
         self.cancel_button.clicked.connect(self.cancel_action)
 
         # Button Layout
@@ -158,16 +148,11 @@ class SubmitChangelistWidget(QDialog):
         """
         Populate the table widget with the files to submit.
         """
-        #self.files_table_widget.setRowCount(0)  # Clear existing rows
-
-
         description = self.change_sg_item.get("description", "")
         user = self.change_sg_item.get("p4_user", "")
         head_time = self.change_sg_item.get("headTime", "")
         change_time = self.change_sg_item.get("time", "")
-        # logger.debug(f"head_time:{head_time}, change_time:{change_time}")
         date_time = self._fix_timestamp(head_time)
-        # logger.debug(f"date_time:{date_time}")
         change = self.change_sg_item.get("change", "")
         workspace = self.change_sg_item.get("client", "")
         self.changelist_description.setText(description)
@@ -195,7 +180,6 @@ class SubmitChangelistWidget(QDialog):
         entity_thread.join()  # Wait for the thread to finish before populating the table
 
         for key, file_info in self.submit_widget_dict.items():
-            # logger.debug(">>>>>>>>>>> file_info:{}".format(file_info))
             entity = None
             sg_item = file_info.get("sg_item", None)
             logger.debug(">>>>>>>>>>> sg_item before additions:{}".format(sg_item))
@@ -230,7 +214,7 @@ class SubmitChangelistWidget(QDialog):
                 # Context column
                 context_str = sg_item.get("context")
                 self.files_table_widget.setItem(row_position, 9,
-                                                QTableWidgetItem(context_str if context_str else "None"))
+                                               QTableWidgetItem(context_str if context_str else "None"))
                 comment_item = QTableWidgetItem("Entity is recognizable")
                 comment_item.setToolTip("Entity is recognizable")
                 self.files_table_widget.setItem(row_position, 10, comment_item)
@@ -251,12 +235,7 @@ class SubmitChangelistWidget(QDialog):
                     item.setForeground(QtGui.QBrush(QtGui.QColor(255, 0, 0)))  # Red color
                     item.setFlags(Qt.NoItemFlags)  # Disable interaction for the item
 
-
-            # logger.debug(">>>>>>>>>>> sg_item after additions:{}".format(self.submit_widget_dict[key]))
             row_position += 1
-
-        # Update the button states based on the initial description and file selection
-        #self.update_buttons_state()
 
     def process_entities(self, submit_widget_dict, get_entity_callback):
         """
@@ -282,7 +261,6 @@ class SubmitChangelistWidget(QDialog):
         :param sg_item: Standard Shotgun entity dictionary with keys type, id and name.
         :return: Tuple with entity name and id.
         """
-
         if sg_item:
             entity, published_file = self.parent.get_entity_from_sg_item(sg_item)
             if entity:
@@ -316,34 +294,19 @@ class SubmitChangelistWidget(QDialog):
             sg_timestamp = datetime.datetime.fromtimestamp(
                 unix_timestamp, shotgun_api3.sg_timezone.LocalTimezone()
             )
-            # sg_timestamp = sg_timestamp.strftime('%Y-%m-%d %H:%M:%S')
-            sg_timestamp =str(sg_timestamp.strftime('%Y-%m-%d %H:%M:%S'))
-            #sg_timestamp = str(sg_timestamp)
+            sg_timestamp = str(sg_timestamp.strftime('%Y-%m-%d %H:%M:%S'))
         except Exception as e:
-            # logger.debug("Failed to convert timestamp: %s" % e)
             sg_timestamp = ""
         return sg_timestamp
-
-    def update_buttons_state_original(self):
-        """
-        Enable or disable the submit and save buttons based on the description length and file selection.
-        """
-        description_length = len(self.changelist_description.toPlainText())
-        has_files = any(self.files_table_widget.item(row, 0).checkState() == Qt.Checked for row in
-                        range(self.files_table_widget.rowCount()))
-
-        self.submit_button.setEnabled(description_length >= 5 and has_files)
-        self.save_button.setEnabled(description_length >= 5)
 
     def update_buttons_state(self):
         """
         Enable or disable the submit button based on conditions.
         """
-        description_length = len(self.changelist_description.toPlainText()) if hasattr(self,
-                                                                                       'changelist_description') else 0
+        description_length = len(self.changelist_description.toPlainText()) if hasattr(self, 'changelist_description') else 0
         has_files = any(
             self.files_table_widget.item(row, 0).checkState() == Qt.Checked and
-            self.files_table_widget.item(row, 10).text() != "Entity is not recognized"
+            self.files_table_widget.item(row, 10).text() == "Entity is recognizable"
             for row in range(self.files_table_widget.rowCount())
         )
         self.submit_button.setEnabled(description_length >= 5 and has_files)
@@ -384,8 +347,6 @@ class SubmitChangelistWidget(QDialog):
                 }
                 selected_files.append(file_info)
 
-
-
         if not selected_files:
             QMessageBox.warning(self, "Warning", "No files selected for submission.")
             return
@@ -405,10 +366,7 @@ class SubmitChangelistWidget(QDialog):
                     if "sg_item" in full_file_info:
                         sg_item = full_file_info["sg_item"]
                         entity = sg_item.get("entity", None)
-
-                    #full_file_info["description"] = description
                         if entity:
-
                             action = full_file_info.get("pending_action", None)
                             if action == "delete":
                                 file_info_deleted.append(full_file_info)
@@ -432,7 +390,6 @@ class SubmitChangelistWidget(QDialog):
             self.parent._add_log(msg, 2)
             # Update the Pending view
             self.parent._populate_pending_widget()
-            # logger.debug(">>>>>>>>>>> Updating the publish view as well")
             self.parent._on_treeview_item_selected()
 
         # Close the dialog after submission
@@ -453,7 +410,6 @@ class SubmitChangelistWidget(QDialog):
         """
         Handle the cancel action
         """
-        # self.reject()
         self.close()
 
     def save_changelist(self):
@@ -476,8 +432,6 @@ class SubmitChangelistWidget(QDialog):
             logger.debug(f"Changelist {change} saved with description: {description}")
             msg = "\n <span style='color:#2C93E2'>Updating the Pending view ...</span> \n"
             self.parent._add_log(msg, 2)
-            # Update the Pending view
-            # self.parent.update_pending_view()
             self.parent._populate_pending_widget()
         except Exception as e:
             logger.error(f"Failed to save changelist {change}: {e}")

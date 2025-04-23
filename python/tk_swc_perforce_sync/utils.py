@@ -409,6 +409,35 @@ def check_validity_by_path_parts(swc_fw, sg_item):
     """
     Check if the filepath leads to a valid ShotGrid entity
     :param sg_item: ShotGrid item information
+    :return: (entity_dict, None) if context is found, else (None, None)
+    """
+    if not sg_item or "path" not in sg_item:
+        return None, None
+
+    # logger.debug(f">>>>> Checking validity by path parts: sg_item: {sg_item}")
+    local_path = sg_item["path"].get("local_path")
+
+    try:
+        target_context = swc_fw.find_task_context(local_path)
+    except AttributeError as e:
+        logger.debug(f">>>>> Error in find_task_context: {e}")
+        return None, None
+
+    if target_context and target_context.entity:
+        entity = {
+            "type": target_context.entity.get("type"),
+            "id": target_context.entity.get("id"),
+            "name": target_context.entity.get("name")
+        }
+        return entity, None
+
+    return None, None
+
+
+def check_validity_by_path_parts_1(swc_fw, sg_item):
+    """
+    Check if the filepath leads to a valid ShotGrid entity
+    :param sg_item: ShotGrid item information
     :return: entity and published file info if found, None otherwise
     """
     target_context = None
