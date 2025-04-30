@@ -626,9 +626,9 @@ class Ui_Dialog(object):
         self.panel_layout.setContentsMargins(4, 4, 4, 4)
         self.panel_layout.setObjectName("panel_layout")
 
-
-        self.details_tab.addTab(self.file_details, "Files")
         self.details_tab.addTab(self.panel_details, "Panel")
+        self.details_tab.addTab(self.file_details, "Files")
+
 
 
         self.retranslateUi(Dialog)

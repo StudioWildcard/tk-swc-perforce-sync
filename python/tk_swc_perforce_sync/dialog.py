@@ -801,7 +801,7 @@ class AppDialog(QWidget):
         logger.debug(f"Added {len(files_data)} files to changelist '{changelist_id}' data.")
 
 
-    def _get_shotgun_panel_widget(self):
+    def _get_shotgun_panel_widget_orig(self):
         # Get the current engine
         engine = sgtk.platform.current_engine()
         if not engine:
@@ -843,6 +843,82 @@ class AppDialog(QWidget):
                     logger.error("Failed to create or add the Shotgun panel widget: {}".format(e))
             else:
                 logger.warning("Shotgun Panel app is not loaded. Please check configuration.")
+
+
+
+    def _get_shotgun_panel_widget(self, target_entity=None):  # NEW Signature
+        """
+        Retrieves or creates the Shotgun Panel widget and navigates it
+        to the specified target entity.
+
+        :param dict target_entity: The ShotGrid entity dictionary (e.g., Asset, Shot)
+                                   to navigate the panel to. If None, attempts
+                                   to use self._entity_data.
+        """
+        engine = sgtk.platform.current_engine()
+        if not engine:
+            logger.error("No current engine found.")
+            return  # Return early if no engine
+
+        shotgun_panel_app = engine.apps.get("tk-multi-shotgunpanel")
+
+        if shotgun_panel_app:
+            try:
+                # Get or create the widget
+                if not self.shotgun_panel_widget:
+                    # Pass the parent widget (self.ui.panel_details)
+                    self.shotgun_panel_widget = shotgun_panel_app.create_widget_for_P4SG(self.ui.panel_details)
+
+                if self.shotgun_panel_widget:
+                    # --- Navigation Logic ---
+                    # Prioritize the explicitly passed target_entity
+                    entity_to_navigate = target_entity if target_entity else self._entity_data
+
+                    if entity_to_navigate:
+                        # Extract ID and Type directly from the resolved entity
+                        entity_id = entity_to_navigate.get("id")
+                        entity_type = entity_to_navigate.get("type")
+
+                        if entity_id and entity_type:
+                            logger.debug(f"Navigate to entity: {entity_type} ID # {entity_id}")
+                            try:
+                                # Ensure navigation happens after widget is potentially created/added
+                                QtCore.QTimer.singleShot(0, lambda: self.shotgun_panel_widget.navigate_to_entity(
+                                    entity_type, entity_id))
+                                # self.shotgun_panel_widget.navigate_to_entity(entity_type, entity_id) # Original direct call
+                            except Exception as nav_err:
+                                logger.error(f"Error during panel navigation: {nav_err}")
+                        else:
+                            logger.warning(
+                                f"Could not navigate panel: Invalid ID ({entity_id}) or Type ({entity_type}) in {entity_to_navigate}")
+                    else:
+                        logger.debug("No entity data available for panel navigation.")
+                    # --- End Navigation Logic ---
+
+                    # --- Layout Logic ---
+                    # Check if the widget is already in the layout to avoid adding duplicates
+                    current_widget = self.ui.panel_layout.itemAt(0)
+                    if not current_widget or current_widget.widget() != self.shotgun_panel_widget:
+                        # Clear existing widgets first
+                        while self.ui.panel_layout.count():
+                            child = self.ui.panel_layout.takeAt(0)
+                            if child.widget():
+                                # Set parent to None to remove without deleting immediately
+                                child.widget().setParent(None)
+
+                        # Add the panel widget
+                        self.ui.panel_layout.addWidget(self.shotgun_panel_widget)
+                        logger.info("Shotgun panel widget added/updated in the layout.")
+                    # --- End Layout Logic ---
+
+                else:
+                    logger.error("Failed to retrieve or create the panel widget.")
+            except Exception as e:
+                logger.error(f"Failed to create or add the Shotgun panel widget: {e}", exc_info=True)
+        else:
+            logger.warning("Shotgun Panel app 'tk-multi-shotgunpanel' is not loaded.")
+
+
 
     def _run_function_once(self):
         try:
@@ -3389,9 +3465,35 @@ class AppDialog(QWidget):
             """
         return pipeline_step
 
-    def _get_modified_date(self, dt):
+    def _get_modified_date_original(self, dt):
 
         publish_time = create_modified_date(dt)
+        return publish_time
+
+    def _get_modified_date(self, dt):
+        """
+        Converts a timestamp (float) to a datetime object before passing
+        it to create_modified_date.
+
+        :param dt: Float timestamp representing the modification time, or 0.
+        :return: Human-readable date string or "N/A".
+        """
+        publish_time = "N/A" # Default value
+        if dt and dt > 0:
+            try:
+                # Convert the float timestamp to a datetime object
+                dt_datetime = datetime.datetime.fromtimestamp(dt)
+                # Pass the datetime object to the helper function
+                publish_time = create_modified_date(dt_datetime)
+            except ValueError as e:
+                logger.error(f"Error converting timestamp {dt} to datetime: {e}")
+                publish_time = "Invalid Date"
+            except Exception as e:
+                # Catch potential errors within create_modified_date itself
+                logger.error(f"Error in create_modified_date for timestamp {dt}: {e}")
+                publish_time = "Error"
+        # else: dt is 0 or None, publish_time remains "N/A"
+
         return publish_time
 
     def _get_publish_time_for_column_view(self, dt):
@@ -8598,7 +8700,7 @@ class AppDialog(QWidget):
 
             pass
 
-    def _on_treeview_item_selected(self):
+    def _on_treeview_item_selected_orig(self):
         """
         Slot triggered when someone changes the selection in a treeview.
         """
@@ -8648,6 +8750,206 @@ class AppDialog(QWidget):
 
         # self. _clean_sg_data()
 
+
+    def _on_treeview_item_selected_2(self):
+        """
+        Slot triggered when someone changes the selection in a treeview.
+        Resolves the correct entity for panel navigation, especially for Tasks.
+        """
+        self._fstat_dict = {}
+        self._entity_data, item = self._reload_treeview()
+
+        # --- Resolve the entity to navigate the panel to ---
+        target_entity_for_panel = None
+        if self._entity_data:
+            entity_type = self._entity_data.get("type")
+            if entity_type == "Task":
+                # Extract the linked entity (Asset/Shot) from the Task data
+                linked_entity = self._entity_data.get("entity")
+                # Ensure linked_entity is a valid dictionary with id and type
+                if linked_entity and isinstance(linked_entity, dict) and linked_entity.get("id") and linked_entity.get(
+                        "type"):
+                    target_entity_for_panel = linked_entity
+                    logger.debug(f"Resolved Task to linked entity for panel: {target_entity_for_panel}")
+                else:
+                    logger.warning(f"Task selected, but couldn't resolve linked entity from: {self._entity_data}")
+            else:
+                # For non-Task items, the entity data itself is the target
+                target_entity_for_panel = self._entity_data
+        # --- End Panel Entity Resolution ---
+
+        # --- Get path using original entity data (might still fail for Tasks) ---
+        # _get_entity_info is called inside _reload_treeview via _load_publishes_for_entity_item indirectly,
+        # but let's call it explicitly here if needed for self._entity_path
+        self._entity_path, _, _ = self._get_entity_info(self._entity_data)
+        logger.debug(f"Entity path determined as: {self._entity_path}")  # Log path result
+
+        # --- Load publishes based on the *linked* entity if it was a Task ---
+        entity_id_for_publishes = None
+        entity_type_for_publishes = None
+        if target_entity_for_panel:  # Use the resolved entity (Asset/Shot) for fetching publishes
+            entity_id_for_publishes = target_entity_for_panel.get("id")
+            entity_type_for_publishes = target_entity_for_panel.get("type")
+        elif self._entity_data:  # Fallback for non-task or unresolved task
+            entity_id_for_publishes = self._entity_data.get("id")
+            entity_type_for_publishes = self._entity_data.get("type")
+
+        model = self.ui.publish_view.model()
+        # Check source model row count if using proxy
+        source_model = model.sourceModel() if isinstance(model, QtGui.QSortFilterProxyModel) else model
+        # logger.debug(f"Publish source model row count: {source_model.rowCount()}")
+
+        # Always try to refresh publish data based on the resolved entity
+        if entity_id_for_publishes and entity_type_for_publishes:
+            # Assuming _load_publishes_for_entity_item handles fetching based on item data
+            # Let's ensure the publish model is explicitly loaded/reloaded here
+            # The 'item' variable holds the QStandardItem from the tree
+            self._load_publishes_for_entity_item(item)  # This should use the item's data
+            # Then, fetch current data based on the loaded model
+            self.get_current_sg_data()
+        else:
+            logger.warning("Could not determine entity ID/Type to fetch publishes.")
+            self._sg_data = []  # Clear sg_data if we can't fetch
+
+        # --- Update Perforce data and other UI elements ---
+        self._update_perforce_data()
+        self.print_publish_data()  # Assumes this uses self._sg_data
+
+        # --- Update panel, passing the RESOLVED entity ---
+        # Use QTimer.singleShot to ensure panel update happens after current event processing
+        QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(target_entity_for_panel))
+        # self._get_shotgun_panel_widget(target_entity_for_panel) # Original direct call
+
+        # --- Update other views ---
+        if self.main_view_mode == self.MAIN_VIEW_COLUMN:
+            # Use QTimer.singleShot if updates depend on panel/publish loading
+            QtCore.QTimer.singleShot(0, self._set_column_view_mode)
+            # self._set_column_view_mode() # Original direct call
+        if self.main_view_mode == self.MAIN_VIEW_SUBMITTED:
+            # Use QTimer.singleShot if updates depend on panel/publish loading
+            QtCore.QTimer.singleShot(0, self._populate_submitted_widget)
+            # self._populate_submitted_widget() # Original direct call
+
+    def _on_treeview_item_selected(self):
+
+        """
+        Slot triggered when someone changes the selection in a treeview.
+        Resolves the correct entity for panel navigation, especially for Tasks.
+        """
+        logger.debug("Treeview item selection changed.")
+        self._fstat_dict = {}  # Reset Perforce status
+
+        # 1. Get the selected item from the tree view FIRST
+        selected_item = self._get_selected_entity()
+
+        # --- Early exit if nothing is selected ---
+        if not selected_item:
+            logger.debug("No item selected in the tree view.")
+            # Clear dependent UI elements
+            self._publish_model.clear()  # Clear publish view
+            self._sg_data = []
+            self._fstat_dict = {}
+            self._entity_path = None
+            self._entity_data = None  # Ensure this is None
+            self._setup_file_details_panel([])  # Clear details panel
+            QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(None))  # Clear panel
+            # Optionally clear column/submitted views if applicable
+            if self.main_view_mode == self.MAIN_VIEW_COLUMN:
+                self.column_view_model.setRowCount(0)
+            if self.main_view_mode == self.MAIN_VIEW_SUBMITTED:
+                self._reset_submitted_widget()
+            return  # Stop processing
+
+        # 2. Extract the core ShotGrid data directly from the selected item
+        # model_item_data.get_item_data usually returns (sg_data, field_value)
+        # sg_data is the full dict for leaf nodes (Assets, Shots)
+        # field_value can be the entity dict for 'My Tasks' (Task entity)
+        # Let's prioritize field_value if it's an entity dict, else use sg_data
+        sg_data_from_tree, field_value_from_tree = model_item_data.get_item_data(selected_item)
+
+        # Determine the primary entity data associated with the click
+        # This handles both Asset/Shot clicks and Task clicks correctly
+        entity_data_clicked = None
+        if isinstance(field_value_from_tree, dict) and field_value_from_tree.get("type") and field_value_from_tree.get(
+                "id"):
+            entity_data_clicked = field_value_from_tree  # e.g., Task data from 'My Tasks'
+            logger.debug(f"Using field_value as primary entity data: {entity_data_clicked}")
+        elif isinstance(sg_data_from_tree, dict) and sg_data_from_tree.get("type") and sg_data_from_tree.get("id"):
+            entity_data_clicked = sg_data_from_tree  # e.g., Asset data from 'Assets'
+            logger.debug(f"Using sg_data as primary entity data: {entity_data_clicked}")
+        else:
+            logger.error(
+                f"Could not extract valid entity data from selected tree item: sg_data={sg_data_from_tree}, field_value={field_value_from_tree}")
+            # Handle error state - maybe clear UI? For now, log and return.
+            return
+
+        # Store this primary data (Asset, Shot, or Task)
+        self._entity_data = entity_data_clicked  # THIS IS NOW RELIABLE
+
+        # 3. Resolve the entity for Panel Navigation (Handles Tasks)
+        target_entity_for_panel = None
+        if self._entity_data:
+            entity_type = self._entity_data.get("type")
+            if entity_type == "Task":
+                linked_entity = self._entity_data.get("entity")
+                if linked_entity and isinstance(linked_entity, dict) and linked_entity.get("id") and linked_entity.get(
+                        "type"):
+                    target_entity_for_panel = linked_entity
+                    logger.debug(f"Resolved Task to linked entity for panel: {target_entity_for_panel}")
+                else:
+                    logger.warning(f"Task selected, but couldn't resolve linked entity from: {self._entity_data}")
+            else:
+                target_entity_for_panel = self._entity_data  # Asset, Shot, etc.
+                logger.debug(f"Using selected entity for panel: {target_entity_for_panel}")
+        else:
+            # This case should ideally not happen due to the early exit, but good to keep
+            logger.warning("self._entity_data is unexpectedly None after extraction.")
+
+        # 4. Get the Filesystem Path (using the primary clicked entity data)
+        # _get_entity_info handles Task resolution internally if needed for path
+        self._entity_path, _, _ = self._get_entity_info(self._entity_data)
+        logger.debug(f"Entity path determined as: {self._entity_path}")
+
+        # 5. Trigger Publish Model Load (using the selected tree item)
+        # We call this primarily for its side effect of loading the publish model.
+        # We no longer rely on its return value here.
+        self._load_publishes_for_entity_item(selected_item)
+        # Note: _load_publishes_for_entity_item internally calls _publish_model.load_data,
+        # which *should* use the item's sg_data to set its filters correctly.
+
+        # 6. Get Data from Models (after they've potentially been updated)
+        self.get_current_sg_data()  # Populates self._sg_data from the publish model
+        self._update_perforce_data()  # Populates self._fstat_dict using self._sg_data and self._entity_path
+
+        # Optional: Debugging
+        # self.print_publish_data()
+
+        # 7. Update UI Elements (using timers for safety)
+
+        # Update panel, passing the RESOLVED entity for navigation
+        logger.debug(f"Scheduling panel update for: {target_entity_for_panel}")
+        QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(target_entity_for_panel))
+
+        # Update other views based on the current mode and populated data
+        if self.main_view_mode == self.MAIN_VIEW_COLUMN:
+            logger.debug("Scheduling Column View update.")
+            # _set_column_view_mode calls _populate_column_view_widget which uses self._sg_data and self._fstat_dict
+            QtCore.QTimer.singleShot(0, self._set_column_view_mode)
+        if self.main_view_mode == self.MAIN_VIEW_SUBMITTED:
+            logger.debug("Scheduling Submitted View update.")
+            # _populate_submitted_widget uses self._fstat_dict
+            QtCore.QTimer.singleShot(0, self._populate_submitted_widget)
+        # Add similar blocks for MAIN_VIEW_LIST, MAIN_VIEW_THUMB if they need explicit updates
+        # based on self._sg_data / self._fstat_dict after selection change.
+        # Currently, they might update automatically via model/view connections.
+
+        # Update breadcrumbs and history (already done in _reload_treeview, but let's ensure it's consistent)
+        # These were moved out of _reload_treeview in this refactor, place them here:
+        self._populate_entity_breadcrumbs(selected_item)
+        self._add_file_history_record(self._current_entity_preset, selected_item)
+        self._setup_file_details_panel([])  # Clear details initially
+
+    logger.debug("Finished _on_treeview_item_selected.")
     def get_current_sg_data(self):
         """
         Populates self._sg_data with ShotGrid publish data from the source model,
@@ -9428,7 +9730,7 @@ class AppDialog(QWidget):
         sg_data = self._load_publishes_for_entity_item(selected_item)
         return sg_data
 
-    def _reload_treeview(self):
+    def _reload_treeview_orig(self):
         """
         Slot triggered when someone changes the selection in a treeview.
         """
@@ -9453,6 +9755,35 @@ class AppDialog(QWidget):
         # tell publish UI to update itself
         sg_data = self._load_publishes_for_entity_item(selected_item)
         return sg_data, selected_item
+
+    def _reload_treeview(self):
+        """
+        Handles UI updates related to tree view selection *before*
+        the main data loading in _on_treeview_item_selected.
+        Returns the selected QStandardItem.
+        """
+        selected_item = self._get_selected_entity()
+
+        # Update breadcrumbs (Moved to _on_treeview_item_selected)
+        # self._populate_entity_breadcrumbs(selected_item)
+
+        # Fetch more items in the tree if needed
+        if selected_item:
+            model = self._entity_presets[self._current_entity_preset].model
+            if model.canFetchMore(selected_item.index()):
+                model.fetchMore(selected_item.index())
+
+        # Add to history (Moved to _on_treeview_item_selected)
+        # self._add_file_history_record(self._current_entity_preset, selected_item)
+
+        # Clear details panel (Moved to _on_treeview_item_selected)
+        # self._setup_file_details_panel([])
+
+        # Trigger publish model load (Moved to _on_treeview_item_selected)
+        # self._load_publishes_for_entity_item(selected_item)
+
+        # Return ONLY the selected item
+        return selected_item
 
     def _load_publishes_for_entity_item(self, item):
         """
