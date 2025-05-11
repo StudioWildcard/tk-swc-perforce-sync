@@ -146,6 +146,54 @@ background-image: url(:/res/right_arrow_hover.png);
 QToolButton:Pressed {
 background-image: url(:/res/right_arrow_pressed.png);
 }
+
+ </string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QToolButton" name="refresh_button">
+         <property name="minimumSize">
+          <size>
+           <width>40</width>
+           <height>40</height>
+          </size>
+         </property>
+         <property name="maximumSize">
+          <size>
+           <width>40</width>
+           <height>40</height>
+          </size>
+         </property>
+         <property name="toolTip">
+          <string>&lt;i&gt;Go forward&lt;/i&gt; in the folder history.</string>
+         </property>
+         <property name="accessibleName">
+          <string>refresh_button</string>
+         </property>
+         <property name="styleSheet">
+          <string notr="true">QToolButton{
+   border: none;
+   background-color: none;
+   background-repeat: no-repeat;
+   background-position: center center;
+   background-image: url(:/res/refresh.png);
+}
+
+QToolButton:disabled{
+   background-image: url(:/res/refresh_disabled.png);
+}
+
+
+QToolButton:hover{
+background-image: url(:/res/refresh_hover.png);
+}
+
+QToolButton:Pressed {
+background-image: url(:/res/refresh_pressed.png);
+}
+
+
 </string>
          </property>
         </widget>
@@ -898,6 +946,7 @@ background-image: url(:/res/right_arrow_pressed.png);
   <tabstop>navigation_home</tabstop>
   <tabstop>navigation_prev</tabstop>
   <tabstop>navigation_next</tabstop>
+  <tabstop>refresh_button</tabstop>
   <tabstop>publish_type_list</tabstop>
   <tabstop>show_sub_items</tabstop>
   <tabstop>thumb_scale</tabstop>

@@ -45,14 +45,6 @@
     <file>refresh_hover.png</file>
     <file>refresh_pressed.png</file>
     <file>refresh_disabled.png</file>
-    <file>get_latest.png</file>
-    <file>get_latest_hover.png</file>
-    <file>get_latest_pressed.png</file>
-    <file>get_latest_disabled.png</file>
-    <file>submit.png</file>
-    <file>submit_hover.png</file>
-    <file>submit_pressed.png</file>
-    <file>submit_disabled.png</file>
     <file>clear_search.png</file>
     <file>icon_Asset_dark.png</file>
     <file>icon_EventLogEntry_dark.png</file>

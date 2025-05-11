@@ -168,23 +168,23 @@ class AppDialog(QWidget):
             os.path.join(os.path.dirname(__file__), "..", "..")
         )
 
-        active_refresh_button_image_path = os.path.join(self.repo_root, "icons/refresh_active_20.png")
-        self.active_refresh_button_icon = QIcon(QPixmap(active_refresh_button_image_path))
+        #active_refresh_button_image_path = os.path.join(self.repo_root, "icons/refresh_active_20.png")
+        #self.active_refresh_button_icon = QIcon(QPixmap(active_refresh_button_image_path))
 
-        active_get_latest_image_path = os.path.join(self.repo_root, "icons/get_latest_active_20")
-        self.active_get_latest_button_icon = QIcon(QPixmap(active_get_latest_image_path))
+        #active_get_latest_image_path = os.path.join(self.repo_root, "icons/get_latest_active_40")
+        #self.active_get_latest_button_icon = QIcon(QPixmap(active_get_latest_image_path))
 
-        active_submit_button_image_path = os.path.join(self.repo_root, "icons/submit_active_20")
-        self.active_submit_button_icon = QIcon(QPixmap(active_submit_button_image_path))
+        #active_submit_button_image_path = os.path.join(self.repo_root, "icons/submit_active_20")
+        #self.active_submit_button_icon = QIcon(QPixmap(active_submit_button_image_path))
 
-        inactive_refresh_button_image_path = os.path.join(self.repo_root, "icons/refresh_off_20.png")
-        self.inactive_refresh_button_icon = QIcon(QPixmap(inactive_refresh_button_image_path))
+        #inactive_refresh_button_image_path = os.path.join(self.repo_root, "icons/refresh_off_20.png")
+        #self.inactive_refresh_button_icon = QIcon(QPixmap(inactive_refresh_button_image_path))
 
-        inactive_get_latest_image_path = os.path.join(self.repo_root, "icons/get_latest_off_20")
-        self.inactive_get_latest_button_icon = QIcon(QPixmap(inactive_get_latest_image_path))
+        #inactive_get_latest_image_path = os.path.join(self.repo_root, "icons/get_latest_off_20")
+        #self.inactive_get_latest_button_icon = QIcon(QPixmap(inactive_get_latest_image_path))
 
-        inactive_submit_button_image_path = os.path.join(self.repo_root, "icons/submit_off_20")
-        self.inactive_submit_button_icon = QIcon(QPixmap(inactive_submit_button_image_path))
+        #inactive_submit_button_image_path = os.path.join(self.repo_root, "icons/submit_off_20")
+        #self.inactive_submit_button_icon = QIcon(QPixmap(inactive_submit_button_image_path))
 
         active_column_view_image_path = os.path.join(self.repo_root, "icons/mode_switch_column_active.png")
         self.active_column_view_icon = QIcon(QPixmap(active_column_view_image_path))
@@ -1667,10 +1667,11 @@ class AppDialog(QWidget):
             self.ui.fix_selected.setEnabled(False)
             self.ui.fix_all.setEnabled(False)
             self.ui.submit_files.setEnabled(False)
-            self.ui.refresh_button.setIcon(self.active_refresh_button_icon)
-            self.ui.get_latest_button.setIcon(self.active_get_latest_button_icon)
-            self.ui.submit_button.setIcon(self.inactive_submit_button_icon)
+            #self.ui.refresh_button.setIcon(self.active_refresh_button_icon)
+            # self.ui.get_latest_button.setIcon(self.active_get_latest_button_icon)
+            #self.ui.submit_button.setIcon(self.inactive_submit_button_icon)
             self.ui.get_latest_button.setEnabled(True)
+
             self.ui.submit_button.setEnabled(False)
 
 
@@ -1695,9 +1696,10 @@ class AppDialog(QWidget):
             self.ui.fix_selected.setEnabled(False)
             self.ui.fix_all.setEnabled(False)
             self.ui.submit_files.setEnabled(False)
-            self.ui.refresh_button.setIcon(self.active_refresh_button_icon)
-            self.ui.get_latest_button.setIcon(self.active_get_latest_button_icon)
-            self.ui.submit_button.setIcon(self.inactive_submit_button_icon)
+            #self.ui.refresh_button.setIcon(self.active_refresh_button_icon)
+            # self.ui.get_latest_button.setIcon(self.active_get_latest_button_icon)
+            self.ui.get_latest_button.setEnabled(True)
+            #self.ui.submit_button.setIcon(self.inactive_submit_button_icon)
             self.ui.get_latest_button.setEnabled(True)
             self.ui.submit_button.setEnabled(False)
 
@@ -1718,9 +1720,11 @@ class AppDialog(QWidget):
             self.ui.fix_all.setEnabled(False)
             self.ui.submit_files.setEnabled(False)
 
-            self.ui.refresh_button.setIcon(self.active_refresh_button_icon)
-            self.ui.get_latest_button.setIcon(self.active_get_latest_button_icon)
-            self.ui.submit_button.setIcon(self.inactive_submit_button_icon)
+            #self.ui.refresh_button.setIcon(self.active_refresh_button_icon)
+            # self.ui.get_latest_button.setIcon(self.active_get_latest_button_icon)
+            self.ui.get_latest_button.setEnabled(True)
+            self.ui.get_latest_button.setEnabled(True)
+            #self.ui.submit_button.setIcon(self.inactive_submit_button_icon)
             self.ui.get_latest_button.setEnabled(True)
             self.ui.submit_button.setEnabled(False)
 
@@ -1741,9 +1745,10 @@ class AppDialog(QWidget):
             self.ui.fix_selected.setEnabled(True)
             self.ui.fix_all.setEnabled(True)
             self.ui.submit_files.setEnabled(False)
-            self.ui.refresh_button.setIcon(self.active_refresh_button_icon)
-            self.ui.get_latest_button.setIcon(self.inactive_get_latest_button_icon)
-            self.ui.submit_button.setIcon(self.inactive_submit_button_icon)
+            #self.ui.refresh_button.setIcon(self.active_refresh_button_icon)
+            # self.ui.get_latest_button.setIcon(self.inactive_get_latest_button_icon)
+            self.ui.get_latest_button.setEnabled(False)
+            #self.ui.submit_button.setIcon(self.inactive_submit_button_icon)
             self.ui.get_latest_button.setEnabled(False)
             self.ui.submit_button.setEnabled(False)
 
@@ -1754,9 +1759,10 @@ class AppDialog(QWidget):
             self.ui.fix_selected.setEnabled(False)
             self.ui.fix_all.setEnabled(False)
             self.ui.submit_files.setEnabled(True)
-            self.ui.refresh_button.setIcon(self.active_refresh_button_icon)
-            self.ui.get_latest_button.setIcon(self.inactive_get_latest_button_icon)
-            self.ui.submit_button.setIcon(self.active_submit_button_icon)
+            #self.ui.refresh_button.setIcon(self.active_refresh_button_icon)
+            #self.ui.get_latest_button.setIcon(self.inactive_get_latest_button_icon)
+            self.ui.get_latest_button.setEnabled(False)
+            #self.ui.submit_button.setIcon(self.active_submit_button_icon)
             self.ui.get_latest_button.setEnabled(False)
             self.ui.submit_button.setEnabled(True)
         else:
@@ -1862,57 +1868,7 @@ class AppDialog(QWidget):
         self.ui.fix_all.setEnabled(False)
         self.ui.submit_files.setEnabled(True)
 
-    def _set_perforce_buttons(self):
-        """Sets the icons for the Perforce action buttons."""
 
-        # --- Refresh Button ---
-        icon_refresh = QIcon()
-        # Attempt to load the pixmap
-        pixmap_refresh = QPixmap(":/res/refresh_active_20.png")
-        # Check if loading failed
-        if pixmap_refresh.isNull():
-            logger.error("Failed to load pixmap ':/res/refresh_active_20.png'")
-            # Optionally set a fallback icon or leave it blank
-            # self.ui.refresh_button.setIcon(QIcon()) # Example: Clear icon
-        else:
-            # Add the valid pixmap to the icon for the normal state
-            icon_refresh.addPixmap(pixmap_refresh, QIcon.Normal, QIcon.Off)
-            self.ui.refresh_button.setIcon(icon_refresh)
-            logger.debug("Successfully set icon for refresh_button.")  # Optional success log
-
-        # --- Get Latest Button ---
-        icon_get_latest = QIcon()
-        pixmap_get_latest = QPixmap(":/res/get_latest_active_20.png")
-        if pixmap_get_latest.isNull():
-            logger.error("Failed to load pixmap ':/res/get_latest_active_20.png'")
-        else:
-            icon_get_latest.addPixmap(pixmap_get_latest, QIcon.Normal, QIcon.Off)
-            self.ui.get_latest_button.setIcon(icon_get_latest)
-            logger.debug("Successfully set icon for get_latest_button.")  # Optional
-
-        # --- Submit Button ---
-        icon_submit = QIcon()
-        pixmap_submit = QPixmap(":/res/submit_active_20.png")
-        if pixmap_submit.isNull():
-            logger.error("Failed to load pixmap ':/res/submit_active_20.png'")
-        else:
-            icon_submit.addPixmap(pixmap_submit, QIcon.Normal, QIcon.Off)
-            self.ui.submit_button.setIcon(icon_submit)
-            logger.debug("Successfully set icon for submit_button.")  # Optional
-
-    def _set_perforce_buttons_original(self):
-
-        self.ui.refresh_button.setIcon(
-            #QIcon(QPixmap(":/res/tmp.png"))
-            #QIcon(QPixmap(":/res/mode_switch_thumb_active.png"))
-            QIcon(QPixmap(":/res/refresh_active_20.png"))
-        )
-        self.ui.get_latest_button.setIcon(
-            QIcon(QPixmap(":/res/get_latest_active_20.png"))
-        )
-        self.ui.submit_button.setIcon(
-            QIcon(QPixmap(":/res/submit_active_20.png"))
-        )
 
     def _refresh_all(self):
         # logger.debug("Refreshing entity preset tabs...")
