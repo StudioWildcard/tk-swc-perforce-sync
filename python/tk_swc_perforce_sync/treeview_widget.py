@@ -89,8 +89,8 @@ class SWCTreeView(QTreeView):
             if is_parent:
                 self.setSelectionMode(QAbstractItemView.SingleSelection)
             else:
-                # self.setSelectionMode(QAbstractItemView.ExtendedSelection)
-                self.setSelectionMode(QAbstractItemView.SingleSelection)
+                self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+                # self.setSelectionMode(QAbstractItemView.SingleSelection)
 
 
     def adjust_selection_mode_pending(self, index):

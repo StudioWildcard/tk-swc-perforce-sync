@@ -4132,18 +4132,10 @@ class AppDialog(QWidget):
 
                     elif action == "sync":
                         # Collect files to sync
-                        #logger.info(f"sync action ...")
-                        #logger.info(f"target file: {target_file}")
-                        #logger.info(f"sg_item: {sg_item}")
                         if target_file:
                             selected_files_to_sync.append(target_file)
                             msg = "Preparing to sync file {} ...".format(target_file)
                             self._add_log(msg, 3)
-                        else:
-                            msg = "Unable to sync file {} ...".format(target_file)
-                            self._add_log(msg, 3)
-
-
 
         # --- Perform bulk revert after the loop ---
         if action == "revert" and selected_files_to_revert:
@@ -4167,8 +4159,8 @@ class AppDialog(QWidget):
                 self._do_sync_files_threading_thread_2(selected_files_to_sync)
                 # After syncing, refresh the data
                 #self.refresh_publish_data()
-                self._refresh_column_view()
-                #self._populate_column_view_widget()
+
+                self._populate_column_view_widget()
                 # or self._set_column_view_mode()
                 msg = f"Syncing of {len(selected_files_to_sync)} file(s) complete."
                 self._add_log(msg, 2)
@@ -4231,9 +4223,6 @@ class AppDialog(QWidget):
                                     selected_files_to_sync.append(target_file)
                                     msg = "Preparing to sync file {} ...".format(target_file)
                                     self._add_log(msg, 3)
-                                else:
-                                    msg = "Unable to sync file {} ...".format(target_file)
-                                    self._add_log(msg, 3)
 
 
         # --- Perform bulk revert after the loop ---
@@ -4257,8 +4246,8 @@ class AppDialog(QWidget):
                 self._do_sync_files_threading_thread_2(selected_files_to_sync)
                 # After syncing, refresh the data
                 #self.refresh_publish_data()
-                self._refresh_column_view()
-                #self._populate_column_view_widget()
+
+                self._populate_column_view_widget()
                 # or self._set_column_view_mode()
                 msg = f"Syncing of {len(selected_files_to_sync)} file(s) complete."
                 self._add_log(msg, 2)

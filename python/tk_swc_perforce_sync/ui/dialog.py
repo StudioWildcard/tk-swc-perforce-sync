@@ -405,7 +405,7 @@ class Ui_Dialog(object):
         spacerItem8 = QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.horizontalLayout_8.addItem(spacerItem8)
         self.verticalLayout.addLayout(self.horizontalLayout_8)
-        
+
 
 
         self.publish_frame = QFrame(self.middle_area_widget)

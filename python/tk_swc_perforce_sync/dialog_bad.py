@@ -3050,6 +3050,110 @@ class AppDialog(QWidget):
         self._standard_item_dict = {}
 
         logger.debug("Setting up Column View table ...")
+        self._setup_column_view()  # Resets the model
+
+        logger.debug("Preparing data for Column View...")
+        combined_sg_data = []
+        processed_keys = set()
+
+        if self._sg_data:
+            for sg_item in self._sg_data:
+                if not sg_item: continue
+                local_path = sg_item.get("path", {}).get("local_path")
+                key_for_fstat_match = None  # Key to match with _fstat_dict
+                if local_path:
+                    base_key = self._create_key(local_path)
+                    version_number = sg_item.get("version_number")
+                    head_rev_sg = sg_item.get("headRev")
+
+                    if version_number is not None:
+                        key_for_fstat_match = f"{base_key}#{int(version_number)}"
+                    elif head_rev_sg:
+                        key_for_fstat_match = f"{base_key}#{head_rev_sg}"
+
+                fstat_data = self._fstat_dict.get(key_for_fstat_match, {}) if key_for_fstat_match else {}
+                merged_item = {**fstat_data, **sg_item}
+
+                if "revision" in fstat_data:  # Ensure fstat revision takes precedence if available
+                    merged_item["revision"] = fstat_data["revision"]
+                merged_item.setdefault("Published", True)
+
+                # Determine the final key for the dictionaries, ensuring it's a string
+                sg_id = merged_item.get("id")  # ShotGrid ID (int or None)
+
+                # This will be the key used for _column_view_dict and _standard_item_dict
+                final_dict_key = None
+                if sg_id is not None:
+                    final_dict_key = str(sg_id)
+                elif key_for_fstat_match:  # Fallback to fstat key if no SG ID
+                    final_dict_key = key_for_fstat_match
+                # Further fallback if key_for_fstat_match was also None (e.g. no path in sg_item)
+                # This case should be rare if sg_item is valid
+                elif merged_item.get("depotFile") and merged_item.get("headRev"):
+                    base_key_depot = self._create_key(
+                        merged_item.get("depotFile"))  # Or use clientFile if more reliable
+                    final_dict_key = f"{base_key_depot}#{merged_item.get('headRev', '0')}"
+
+                if final_dict_key:
+                    combined_sg_data.append(merged_item)
+                    # Store the final_dict_key with the merged_item temporarily for _get_column_data
+                    merged_item["_final_dict_key_"] = final_dict_key
+                    if key_for_fstat_match:
+                        processed_keys.add(key_for_fstat_match)
+                # else: logger.warning(f"Could not determine a final key for SG item: {sg_item.get('code')}")
+
+        for fstat_key, fstat_item in self._fstat_dict.items():
+            if fstat_key not in processed_keys:
+                if not fstat_item.get("Published"):
+                    file_path = fstat_item.get("clientFile")
+                    if file_path:
+                        fstat_item.setdefault("name", os.path.basename(file_path))
+                        fstat_item.setdefault("path", {"local_path": file_path})
+                        fstat_item.setdefault("type", "PublishedFile")
+                        fstat_item.setdefault("action", fstat_item.get("headAction"))
+
+                        # The fstat_key is already the correct string key for these items
+                        fstat_item["_final_dict_key_"] = fstat_key
+                        combined_sg_data.append(fstat_item)
+
+        length = len(combined_sg_data)
+        if combined_sg_data and length > 0:
+            msg = "\n <span style='color:#2C93E2'>Populating the Column View with {} files. Please wait...</span> \n".format(
+                length)
+            self._add_log(msg, 2)
+
+            for sg_item_with_key in combined_sg_data:
+                # Retrieve the final_dict_key we stored
+                final_dict_key = sg_item_with_key.pop("_final_dict_key_", None)
+                if not final_dict_key:
+                    # logger.warning(f"Skipping item due to missing final_dict_key: {sg_item_with_key.get('name')}")
+                    continue
+
+                # Pass the original sg_item (without the temp key) to _get_column_data
+                new_sg_item_for_dict, sg_list_for_model = self._get_column_data(sg_item_with_key)
+
+                if new_sg_item_for_dict:  # new_sg_item_for_dict is the value for _column_view_dict
+                    self._column_view_dict[final_dict_key] = new_sg_item_for_dict
+                if sg_list_for_model:  # sg_list_for_model is the value for _standard_item_dict
+                    self._standard_item_dict[final_dict_key] = sg_list_for_model
+
+            self._get_grouped_column_view_data()
+            self._get_publish_icons()
+            self._set_column_group()
+            logger.debug("Column View population complete.")
+        else:
+            msg = "\n <span style='color:#FFD700'>No files found to display in Column View for the current selection.</span> \n"
+            self._add_log(msg, 2)
+            self.column_view_model.setRowCount(0)
+
+    def _populate_column_view_widget_original(self):
+        """
+        Populates the column view using self._sg_data merged with self._fstat_dict.
+        """
+        self._column_view_dict = {}
+        self._standard_item_dict = {}
+
+        logger.debug("Setting up Column View table ...")
         self._setup_column_view() # Resets the model
 
         # Use self._sg_data as the primary source, augmented by self._fstat_dict
@@ -3198,49 +3302,6 @@ class AppDialog(QWidget):
              # Ensure the view is cleared if no data
              self.column_view_model.setRowCount(0) # Clear the view model directly
 
-    def _populate_column_view_widget_original(self):
-        #self._publish_model.hard_refresh()
-        self._column_view_dict = {}
-        self._standard_item_dict = {}
-
-        logger.debug("Setting up Column View table ...")
-        self._setup_column_view()
-        logger.debug("Getting Perforce data...")
-        self._perforce_sg_data = self._get_perforce_sg_data()
-        length = len(self._perforce_sg_data)
-        if not self._perforce_sg_data:
-            self._perforce_sg_data = self._sg_data
-        if self._perforce_sg_data and length > 0:
-            msg = "\n <span style='color:#2C93E2'>Populating the Column View with {} files. Please wait...</span> \n".format(
-                length)
-            self._add_log(msg, 2)
-            logger.debug("Getting Perforce file size...")
-            self._perforce_sg_data = self._get_perforce_size(self._perforce_sg_data)
-            logger.debug("Populating Column View table...")
-
-            logger.debug("Updating Column View is complete")
-
-            for sg_item in self._perforce_sg_data:
-                # logger.debug("------------------------------------------")
-                #for k, v in sg_item.items():
-                #   logger.debug(">>> {}:{}".format(k, v))
-                id = sg_item.get("id", 0)
-                new_sg_item, sg_list = self._get_column_data(sg_item)
-                #logger.debug(">>> original sg_item: {}".format(sg_item))
-                #logger.debug(">>> new sg_item: {}".format(new_sg_item))
-                if id not in self._column_view_dict and new_sg_item:
-                    self._column_view_dict[id] = new_sg_item
-                #logger.debug(">>> sg_list: {}".format(sg_list))
-                if sg_list:
-
-                    #item = [QStandardItem(str(data)) for data in sg_list]
-                    self._standard_item_dict[id] = sg_list
-            #logger.debug(">>> self._column_view_dict: {}".format(self._column_view_dict))
-            #logger.debug(">>> self._standard_item_dict: {}".format(self._standard_item_dict))
-            #self._populate_column_view_no_groups()
-            self._get_grouped_column_view_data()
-            self._get_publish_icons()
-            self._set_column_group()
 
     def _set_column_group(self):
         if self._current_column_view_grouping == self.COLUMN_VIEW_UNGROUP:
@@ -3783,25 +3844,26 @@ class AppDialog(QWidget):
         """ Populate the table with data"""
         row = 0
         self._set_groups = False
-        for id, sg_item in self._column_view_dict.items():
-            if not sg_item:
+        for item_key, sg_item_val in self._column_view_dict.items():  # Renamed 'id' to 'item_key' for clarity, and 'sg_item' to 'sg_item_val'
+            if not sg_item_val:
                 continue
-            base_name = sg_item.get("name", None)
+            base_name = sg_item_val.get("name", None)
             if base_name and self._column_view_search_filter and len(self._column_view_search_filter) > 1:
                 prefix = self._column_view_search_filter
                 if not base_name.startswith(prefix):
                     # logger.debug(">>> skipping base_name: {}, prefix: {}".format(base_name, prefix))
                     continue
             # Skip deleted files
-            action = sg_item.get("action") or sg_item.get("headAction") or None
+            action = sg_item_val.get("action") or sg_item_val.get("headAction") or None
             if action and action in ["delete"]:
                 msg = "\n <span style='color:#2C93E2'>skipping deleted file: {}</span> \n".format(
                     base_name)
                 self._add_log(msg, 2)
                 continue
-            if id in self._standard_item_dict:
-                item_data = self._standard_item_dict[id]
-                self._insert_perforce_row(row, item_data, sg_item)
+            if item_key in self._standard_item_dict:
+                item_data_list = self._standard_item_dict[item_key]
+                # Pass item_key to _insert_perforce_row
+                self._insert_perforce_row(row, item_data_list, sg_item_val, item_key)
                 row += 1
 
     def _no_groups(self):
@@ -3964,15 +4026,19 @@ class AppDialog(QWidget):
     def on_column_view_row_clicked_no_groups(self, index):
         source_index = self.perforce_proxy_model.mapToSource(index)
         row_number = source_index.row()
-        # logger.debug(f"Clicked Row {row_number}")
-        item = self.column_view_model.item(row_number, 14)  # Get the publish id from the 14th column
-        if item:
-            data = item.text()
-            # Perform actions with the data from the clicked row
-            # logger.debug(f"Clicked Row {row_number}, Data: {data}")
-            if data and data != "N/A":
-                id = int(data)
-                self._setup_column_details_panel(id)
+
+        # Get the item from the first column of the source model row
+        item_in_first_col = self.column_view_model.item(row_number, 0)
+        if item_in_first_col:
+            # Retrieve the stored item_key (string)
+            item_key_for_details = item_in_first_col.data(QtCore.Qt.UserRole + 1)
+            if item_key_for_details:
+                # _setup_column_details_panel expects the key used in _column_view_dict
+                self._setup_column_details_panel(item_key_for_details)
+                # else:
+                # logger.debug(f"No item_key found for details panel at row {row_number}")
+        # else:
+        # logger.debug(f"No item in first column for details panel at row {row_number}")
 
     def on_column_view_row_clicked_group(self, index):
         id_role = QtCore.Qt.UserRole + 1  # Custom role for "id"
@@ -4044,9 +4110,25 @@ class AppDialog(QWidget):
             pass
         return sg_data
 
+    def _insert_perforce_row(self, row, data, sg_item, item_key):
+        tooltip = self._get_tooltip(data, sg_item)
+        for col, value in enumerate(data):
+            item = QStandardItem(str(value))
+            item.setToolTip(tooltip)
+            if col == 5:  # Size
+                item.setData(value, Qt.DisplayRole)
+            if col == 2:  # Action
+                action = data[2]
+                action_icon = self.actions_icons.get_icon_pixmap(action)
+                if action_icon:
+                    item.setIcon(action_icon)
 
+            # Store the item_key (which is a string) in UserRole + 1
+            item.setData(str(item_key), QtCore.Qt.UserRole + 1)
 
-    def _insert_perforce_row(self, row, data, sg_item):
+            self.column_view_model.setItem(row, col, item)
+
+    def _insert_perforce_row_original(self, row, data, sg_item):
         tooltip = self._get_tooltip(data, sg_item)
         for col, value in enumerate(data):
             item = QStandardItem(str(value))
@@ -4084,7 +4166,7 @@ class AppDialog(QWidget):
         else:
             self._on_column_model_action_no_groups(action)
 
-    def _on_column_model_action_no_groups(self, action):
+    def _on_column_model_action_no_groups_original(self, action):
 
         selected_actions = []
         selected_files_to_revert = []  # Keep this for the revert action
@@ -4132,18 +4214,10 @@ class AppDialog(QWidget):
 
                     elif action == "sync":
                         # Collect files to sync
-                        #logger.info(f"sync action ...")
-                        #logger.info(f"target file: {target_file}")
-                        #logger.info(f"sg_item: {sg_item}")
                         if target_file:
                             selected_files_to_sync.append(target_file)
                             msg = "Preparing to sync file {} ...".format(target_file)
                             self._add_log(msg, 3)
-                        else:
-                            msg = "Unable to sync file {} ...".format(target_file)
-                            self._add_log(msg, 3)
-
-
 
         # --- Perform bulk revert after the loop ---
         if action == "revert" and selected_files_to_revert:
@@ -4167,8 +4241,8 @@ class AppDialog(QWidget):
                 self._do_sync_files_threading_thread_2(selected_files_to_sync)
                 # After syncing, refresh the data
                 #self.refresh_publish_data()
-                self._refresh_column_view()
-                #self._populate_column_view_widget()
+
+                self._populate_column_view_widget()
                 # or self._set_column_view_mode()
                 msg = f"Syncing of {len(selected_files_to_sync)} file(s) complete."
                 self._add_log(msg, 2)
@@ -4179,7 +4253,98 @@ class AppDialog(QWidget):
         if selected_actions:
             self.perform_changelist_selection(selected_actions)
 
-    def _on_column_model_action_groups(self, action):
+    def _on_column_model_action_no_groups(self, action):
+
+        selected_actions = []
+        selected_files_to_revert = []
+        selected_files_to_sync = []
+
+        selected_indexes = self.ui.column_view.selectionModel().selectedRows()
+        for selected_index in selected_indexes:
+            # selected_index is for the first column, but UserRole + 1 should be on all items in the row
+            source_index = self.perforce_proxy_model.mapToSource(selected_index)
+
+            # Retrieve the item_key stored in UserRole + 1
+            # It's safer to get it from the specific index if possible, or ensure it's set on all items.
+            # Assuming UserRole + 1 is set on the item at source_index (first column of the source model row)
+            item_key = source_index.model().itemFromIndex(source_index).data(QtCore.Qt.UserRole + 1)
+
+            if not item_key:
+                logger.warning(
+                    f"Could not retrieve item_key for source_index: {source_index.row()}, {source_index.column()}")
+                continue
+
+            sg_item = self._column_view_dict.get(item_key, None)
+
+            if not sg_item:
+                logger.warning(f"No sg_item found in _column_view_dict for key: {item_key}")
+                # selected_row_data = self.get_row_data_from_source(source_index) # For debugging if needed
+                # logger.debug(f"Selected row data for missing key: {selected_row_data}")
+                continue
+
+            # logger.debug(f"_on_column_model_action_no_groups: item_key='{item_key}', action='{action}', sg_item found: {sg_item is not None}")
+
+            if "path" in sg_item:
+                if "local_path" in sg_item["path"]:
+                    target_file = sg_item["path"].get("local_path", None)
+                    depot_file = sg_item.get("depotFile", None)
+
+                    if action in ["add", "move/add", "edit", "delete"]:
+                        sg_item_action = sg_item.get("action", None)
+                        if sg_item_action and sg_item_action == "delete":
+                            msg = "Cannot perform the action on the file {} as it has already been marked for deletion or is deleted.".format(
+                                depot_file)
+                            self._add_log(msg, 2)
+                            continue
+                        if action == "delete":
+                            msg = "Marking file {} for deletion ...".format(depot_file)
+                        else:
+                            msg = "{} file {}".format(action, depot_file)
+                        self._add_log(msg, 2)
+                        selected_actions.append((sg_item, action))
+                    elif action == "revert":
+                        if target_file:
+                            selected_files_to_revert.append(target_file)
+                            msg = "Preparing to revert file {} ...".format(target_file)
+                            self._add_log(msg, 3)
+                    elif action == "sync":
+                        if target_file:
+                            selected_files_to_sync.append(target_file)
+                            msg = "Preparing to sync file {} ...".format(target_file)
+                            self._add_log(msg, 3)
+
+        # --- Perform bulk revert after the loop ---
+        if action == "revert" and selected_files_to_revert:
+            try:
+                msg = f"Reverting {len(selected_files_to_revert)} selected file(s)..."
+                self._add_log(msg, 2)
+                p4_result = self._p4.run("revert", *selected_files_to_revert)
+                logger.debug(f"Bulk revert result: {p4_result}")
+                if p4_result:
+                    # self.refresh_publish_data() # This refreshes the main publish view
+                    self._populate_column_view_widget()  # Refresh column view specifically
+            except Exception as e:
+                logger.error(f"Error during bulk revert: {e}")
+                self._add_log(f"Error during bulk revert: {e}", 2)
+
+        # --- Perform bulk sync after the loop ---
+        if action == "sync" and selected_files_to_sync:
+            try:
+                msg = f"Syncing {len(selected_files_to_sync)} selected file(s)..."
+                self._add_log(msg, 2)
+                self._do_sync_files_threading_thread_2(selected_files_to_sync)
+                # After syncing, refresh the column view data
+                self._populate_column_view_widget()
+                msg = f"Syncing of {len(selected_files_to_sync)} file(s) complete."
+                self._add_log(msg, 2)
+            except Exception as e:
+                logger.error(f"Error during bulk sync: {e}")
+                self._add_log(f"Error during bulk sync: {e}", 2)
+
+        if selected_actions:
+            self.perform_changelist_selection(selected_actions)
+
+    def _on_column_model_action_groups_original(self, action):
         selected_actions = []
         selected_files_to_revert = []
         selected_files_to_sync = []
@@ -4231,9 +4396,6 @@ class AppDialog(QWidget):
                                     selected_files_to_sync.append(target_file)
                                     msg = "Preparing to sync file {} ...".format(target_file)
                                     self._add_log(msg, 3)
-                                else:
-                                    msg = "Unable to sync file {} ...".format(target_file)
-                                    self._add_log(msg, 3)
 
 
         # --- Perform bulk revert after the loop ---
@@ -4257,8 +4419,8 @@ class AppDialog(QWidget):
                 self._do_sync_files_threading_thread_2(selected_files_to_sync)
                 # After syncing, refresh the data
                 #self.refresh_publish_data()
-                self._refresh_column_view()
-                #self._populate_column_view_widget()
+
+                self._populate_column_view_widget()
                 # or self._set_column_view_mode()
                 msg = f"Syncing of {len(selected_files_to_sync)} file(s) complete."
                 self._add_log(msg, 2)
@@ -4269,6 +4431,87 @@ class AppDialog(QWidget):
         if selected_actions:
             self.perform_changelist_selection(selected_actions)
 
+    def _on_column_model_action_groups(self, action):
+        selected_actions = []
+        selected_files_to_revert = []
+        selected_files_to_sync = []
+        selected_indexes = self.ui.column_view.selectionModel().selectedRows()
+
+        id_role = QtCore.Qt.UserRole + 1  # This role should store the string item_key
+
+        for selected_index in selected_indexes:
+            source_index = self.perforce_proxy_model.mapToSource(selected_index)
+            if source_index.isValid():
+                item_key = source_index.data(id_role)  # item_key will be a string
+                if not item_key:
+                    logger.warning(
+                        f"Could not retrieve item_key from grouped view for source_index: {source_index.row()}")
+                    continue
+
+                sg_item = self._column_view_dict.get(item_key, None)
+                # logger.debug(f"_on_column_model_action_groups: item_key='{item_key}', action='{action}', sg_item found: {sg_item is not None}")
+
+                if not sg_item:
+                    logger.warning(f"No sg_item found in _column_view_dict for key: {item_key} in grouped mode.")
+                    continue
+
+                if "path" in sg_item:
+                    if "local_path" in sg_item["path"]:
+                        target_file = sg_item["path"].get("local_path", None)
+                        depot_file = sg_item.get("depotFile", None)
+
+                        if action in ["add", "move/add", "edit", "delete"]:
+                            sg_item_action = sg_item.get("action", None)
+                            if sg_item_action and sg_item_action == "delete":
+                                msg = "Cannot perform the action on the file {} as it has already been marked for deletion or is deleted.".format(
+                                    depot_file)
+                                self._add_log(msg, 2)
+                                continue  # Added continue here
+                            if action == "delete":
+                                msg = "Marking file {} for deletion ...".format(depot_file)
+                            else:
+                                msg = "{} file {}".format(action, depot_file)
+                            self._add_log(msg, 2)
+                            selected_actions.append((sg_item, action))
+                        elif action == "revert":
+                            if target_file:
+                                selected_files_to_revert.append(target_file)
+                                msg = "Preparing to revert file {} ...".format(target_file)
+                                self._add_log(msg, 3)
+                        elif action == "sync":
+                            if target_file:
+                                selected_files_to_sync.append(target_file)
+                                msg = "Preparing to sync file {} ...".format(target_file)
+                                self._add_log(msg, 3)
+        #
+        if action == "revert" and selected_files_to_revert:
+            try:
+                msg = f"Reverting {len(selected_files_to_revert)} selected file(s)..."
+                self._add_log(msg, 2)
+                p4_result = self._p4.run("revert", *selected_files_to_revert)
+                logger.debug(f"Bulk revert result: {p4_result}")
+                if p4_result:
+                    # self.refresh_publish_data()
+                    self._populate_column_view_widget()  # Refresh column view
+            except Exception as e:
+                logger.error(f"Error during bulk revert: {e}")
+                self._add_log(f"Error during bulk revert: {e}", 2)
+
+        if action == "sync" and selected_files_to_sync:
+            try:
+                msg = f"Syncing {len(selected_files_to_sync)} selected file(s)..."
+                self._add_log(msg, 2)
+                self._do_sync_files_threading_thread_2(selected_files_to_sync)
+                # After syncing, refresh the column view data
+                self._populate_column_view_widget()
+                msg = f"Syncing of {len(selected_files_to_sync)} file(s) complete."
+                self._add_log(msg, 2)
+            except Exception as e:
+                logger.error(f"Error during bulk sync: {e}")
+                self._add_log(f"Error during bulk sync: {e}", 2)
+
+        if selected_actions:
+            self.perform_changelist_selection(selected_actions)
 
     def _get_tooltip(self, data, sg_item):
         """

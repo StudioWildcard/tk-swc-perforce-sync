@@ -144,7 +144,7 @@ class SubmitChangelistWidget(QDialog):
         self.update_buttons_state()
         self.populate_file_table()
 
-    def populate_file_table(self):
+    def populate_file_table_original(self):
         """
         Populate the table widget with the files to submit.
         """
@@ -236,6 +236,145 @@ class SubmitChangelistWidget(QDialog):
                     item.setFlags(Qt.NoItemFlags)  # Disable interaction for the item
 
             row_position += 1
+
+    def populate_file_table(self):
+        """
+        Populate the table widget with the files to submit,
+        grouping them by their source Perforce changelist.
+        """
+        # --- 1. Set overall changelist information for the dialog ---
+        # This information comes from the primary changelist item the dialog is working with.
+        description = self.change_sg_item.get("description", "")
+        user = self.change_sg_item.get("p4_user", "")
+        head_time = self.change_sg_item.get("headTime", "")
+        # 'change' here is the ID of the changelist being edited or the target for submission
+        # It's used for the dialog's header, not for individual file rows' source changelist.
+        target_changelist_id = self.change_sg_item.get("change", "")
+        workspace = self.change_sg_item.get("client", "")
+
+        date_time_str = self._fix_timestamp(head_time)
+
+        self.changelist_description.setText(description)
+        self.user_value.setText(user)
+        self.changelist_value.setText(str(target_changelist_id)) # Display target/main CL ID at the top
+        self.date_value.setText(date_time_str)
+        self.workspace_value.setText(workspace)
+
+        # --- 2. Initial button state update ---
+        # This will be updated more accurately after files are processed and table populated.
+        description_length = len(description)
+        has_files_initially = bool(self.submit_widget_dict)
+        self.submit_button.setEnabled(description_length >= 5 and has_files_initially)
+        self.save_button.setEnabled(description_length >= 5)
+
+        # --- 3. Process entities to get full sg_item details (runs in a thread) ---
+        # This updates self.submit_widget_dict in-place.
+        if self.submit_widget_dict: # Only process if there are files
+            entity_thread = threading.Thread(target=self.process_entities, args=(self.submit_widget_dict, self.get_entity))
+            entity_thread.start()
+            entity_thread.join()  # Wait for the thread to finish before populating the table
+        else:
+            logger.debug("No files in submit_widget_dict to process entities for.")
+
+        # --- 4. Clear the table before repopulating ---
+        self.files_table_widget.setRowCount(0) # Clear all rows
+
+        if not self.submit_widget_dict:
+            logger.debug("submit_widget_dict is empty. Table will not be populated.")
+            self.update_buttons_state() # Update buttons based on empty table
+            return
+
+        # --- 5. Prepare and sort file data for display ---
+        # Sort by source changelist ID (headChange), then by file path (key)
+        # This helps visually group files from the same source changelist together.
+        def sort_key_func(item):
+            key, file_info_val = item
+            sg_item_val = file_info_val.get("sg_item", {})
+            # Use a placeholder like '0' or 'default' for sorting if headChange is None or missing
+            head_change_val = sg_item_val.get("headChange") if sg_item_val else None
+            if head_change_val is None or head_change_val == 'default': # Treat 'default' CL specifically if needed
+                return ('default_cl_sort_key', key) # Ensure default might sort differently
+            try:
+                return (int(head_change_val), key) # Sort numerically if possible
+            except ValueError:
+                return (str(head_change_val), key) # Fallback to string sort for CL ID
+
+        sorted_file_items = sorted(self.submit_widget_dict.items(), key=sort_key_func)
+
+        # --- 6. Populate table rows with sorted file data ---
+        row_position = 0
+        for key, file_info in sorted_file_items:
+            self.files_table_widget.insertRow(row_position)
+
+            # Get sg_item which should have been processed by process_entities
+            sg_item = file_info.get("sg_item", None)
+            entity = sg_item.get("entity", None) if sg_item else None
+
+            # Column 0: Checkbox
+            checkbox_item = QTableWidgetItem()
+            checkbox_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            checkbox_item.setCheckState(Qt.Checked) # Default to checked
+            self.files_table_widget.setItem(row_position, 0, checkbox_item)
+
+            # Column 1: File
+            self.files_table_widget.setItem(row_position, 1, QTableWidgetItem(file_info.get("file", "N/A")))
+            # Column 2: In Folder
+            self.files_table_widget.setItem(row_position, 2, QTableWidgetItem(file_info.get("folder", "N/A")))
+            # Column 3: Resolve Status
+            self.files_table_widget.setItem(row_position, 3, QTableWidgetItem(file_info.get("resolve_status", "N/A")))
+            # Column 4: Type
+            self.files_table_widget.setItem(row_position, 4, QTableWidgetItem(file_info.get("type", "N/A")))
+            # Column 5: Pending Action
+            self.files_table_widget.setItem(row_position, 5, QTableWidgetItem(file_info.get("pending_action", "N/A")))
+
+            # Column 6: Changelist (Source Changelist ID of the file)
+            source_changelist_id_str = "N/A"
+            if sg_item and sg_item.get("headChange"):
+                source_changelist_id_str = str(sg_item.get("headChange"))
+            elif sg_item and sg_item.get("change") and not sg_item.get("headChange"): # Fallback if headChange is missing but change exists
+                source_changelist_id_str = str(sg_item.get("change"))
+
+            self.files_table_widget.setItem(row_position, 6, QTableWidgetItem(source_changelist_id_str))
+
+            # Columns 7-10: Entity Info and Comment
+            is_entity_recognized = False
+            if entity and isinstance(entity, dict):
+                entity_name = entity.get("name", "None")
+                entity_id = entity.get("id", "None")
+                context_str = sg_item.get("context", "None") if sg_item else "None"
+
+                self.files_table_widget.setItem(row_position, 7, QTableWidgetItem(str(entity_name)))
+                self.files_table_widget.setItem(row_position, 8, QTableWidgetItem(str(entity_id)))
+                self.files_table_widget.setItem(row_position, 9, QTableWidgetItem(str(context_str)))
+
+                comment_text = "Entity is recognizable"
+                self.files_table_widget.setItem(row_position, 10, QTableWidgetItem(comment_text))
+                self.files_table_widget.item(row_position, 10).setToolTip(comment_text)
+                is_entity_recognized = True
+            else:
+                self.files_table_widget.setItem(row_position, 7, QTableWidgetItem("None"))
+                self.files_table_widget.setItem(row_position, 8, QTableWidgetItem("None"))
+                self.files_table_widget.setItem(row_position, 9, QTableWidgetItem("None"))
+
+                comment_text = "Entity is not recognized"
+                self.files_table_widget.setItem(row_position, 10, QTableWidgetItem(comment_text))
+                self.files_table_widget.item(row_position, 10).setToolTip(comment_text)
+
+            # Apply styling for unrecognized entities
+            if not is_entity_recognized:
+                for col_idx in range(self.files_table_widget.columnCount()):
+                    item = self.files_table_widget.item(row_position, col_idx)
+                    if item is None: # Should not happen if all cells are populated
+                        item = QTableWidgetItem("")
+                        self.files_table_widget.setItem(row_position, col_idx, item)
+                    item.setForeground(QtGui.QBrush(QtGui.QColor(255, 0, 0)))  # Red color
+                    # Make row unselectable/uneditable if entity not recognized, except checkbox
+                    if col_idx > 0 : # Keep checkbox (col 0) interactive
+                         item.setFlags(Qt.ItemIsEnabled) # Keep it enabled but not user checkable/editable
+            row_position += 1
+
+        # --- 7. Final update of button states based on table content ---
+        self.update_buttons_state()
 
     def process_entities(self, submit_widget_dict, get_entity_callback):
         """
