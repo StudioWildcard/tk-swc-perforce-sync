@@ -573,6 +573,8 @@ class AppDialog(QWidget):
         self._current_entity_preset = None
 
         self._load_entity_presets()
+        # self.refresh_entity_preset_tabs()
+
 
         # load visibility state for details pane
         show_details = self._settings_manager.retrieve("show_details", False)
@@ -689,14 +691,8 @@ class AppDialog(QWidget):
         ##########################################################################################
         self.submitter_widget = None
         ##########################################################################################
-        # Schedule refresh_entity_preset_tabs to run after a 5-second delay
-        # This allows initial UI setup and asynchronous data loading (e.g., P4 connection,
-        # initial model loads) to progress before attempting this potentially heavy refresh.
-        initial_refresh_delay_ms = 5000  # 5 seconds
-        QtCore.QTimer.singleShot(initial_refresh_delay_ms, self.refresh_entity_preset_tabs)
-        logger.debug(
-            f"Scheduled a delayed call to refresh_entity_preset_tabs in {initial_refresh_delay_ms / 1000} seconds."
-        )
+        self._refresh_publish_area()
+
 
     def _set_logger(self):
         sg_log_handler = ShotGridLogHandler(self.ui.log_window)
@@ -1971,7 +1967,183 @@ class AppDialog(QWidget):
         self._add_log(msg, 2)
         self._populate_pending_widget()
 
+
+
+    def _get_sync_count_for_task(self, task_sg_item):
+        """
+        Calculates the number of files to sync specifically for a given task item.
+        This performs targeted ShotGrid and Perforce queries.
+        Returns the count of files that need syncing.
+        """
+        if not task_sg_item or task_sg_item.get("type") != "Task":
+            logger.debug(f"Not a valid task item for sync count: {task_sg_item}")
+            return 0  # Or an indicator for "N/A" if you prefer to distinguish
+
+        task_id = task_sg_item.get("id")
+        if not task_id:
+            logger.debug("Task item has no ID for sync count.")
+            return 0
+
+        files_to_sync_count = 0
+        try:
+            # 1. Find PublishedFiles linked to this specific task
+            # Ensure you have the correct project context for the query
+            project_context = self._app.context.project
+            if not project_context:
+                logger.warning("No project context available for fetching task publishes.")
+                return 0  # Cannot proceed
+
+            logger.debug(f"Fetching publishes for Task ID: {task_id}, Project: {project_context}")
+            sg_publishes_for_task = self._app.shotgun.find(
+                "PublishedFile",
+                filters=[
+                    ["task", "is", {"type": "Task", "id": task_id}],
+                    ["project", "is", project_context]
+                    # Add any other essential filters, e.g., not linking to deleted files, specific statuses
+                ],
+                fields=["path", "sg_p4_depo_path", "version_number", "code", "id", "project"]
+                # Fields for p4 and logging
+            )
+
+            if not sg_publishes_for_task:
+                logger.debug(f"No PublishedFiles found linked to Task ID: {task_id}")
+                return 0
+
+            logger.debug(f"Found {len(sg_publishes_for_task)} publishes for Task ID: {task_id}")
+
+            depot_paths_to_check = []
+            for pub in sg_publishes_for_task:
+                depot_path = pub.get("sg_p4_depo_path")
+                if depot_path:
+                    # Using #head to check against the latest revision.
+                    # Adjust if specific versions are needed.
+                    depot_paths_to_check.append(f"{depot_path}#head")
+                # else:
+                # logger.warning(f"Publish '{pub.get('code')}' for Task {task_id} has no sg_p4_depo_path.")
+
+            if not depot_paths_to_check:
+                logger.debug(f"No depot paths to check for Task ID: {task_id} publishes.")
+                return 0
+
+            # 2. Get Perforce fstat for these depot paths
+            if not self._p4 or not self._p4.connected():
+                logger.warning("Perforce not connected. Cannot get fstat for task publishes.")
+                return 0  # Or an "N/A" indicator
+
+            try:
+                # Using run_fstat which can handle multiple paths
+                p4_fstat_results = self._p4.run_fstat(depot_paths_to_check)
+                logger.debug(f"fstat results for Task {task_id}: {len(p4_fstat_results)} items")
+            except Exception as e:
+                logger.error(f"Perforce fstat error for Task {task_id} publishes: {e}")
+                return 0  # Error during fstat
+
+            # 3. Count files that need syncing based on fstat results
+            for f_stat in p4_fstat_results:
+                if isinstance(f_stat, dict):  # Successful fstat for a file
+                    # Skip if marked for delete in Perforce
+                    head_action = f_stat.get("headAction")
+                    if head_action in ["delete", "move/delete"]:
+                        logger.debug(f"Skipping deleted file (fstat): {f_stat.get('depotFile')}")
+                        continue
+
+                    action = f_stat.get("action")  # Current action in client workspace
+                    if action in ["delete", "move/delete"]:  # Also skip if client has it marked for delete
+                        logger.debug(f"Skipping client-deleted file (fstat): {f_stat.get('depotFile')}")
+                        continue
+
+                    have_rev_str = f_stat.get("haveRev")
+                    head_rev_str = f_stat.get("headRev")
+
+                    if head_rev_str:  # File exists in depot at some revision
+                        if not have_rev_str:  # Not on workspace at all
+                            logger.debug(f"File to sync (not on workspace): {f_stat.get('depotFile')}")
+                            files_to_sync_count += 1
+                        else:
+                            try:
+                                if int(have_rev_str) < int(head_rev_str):  # Older revision on workspace
+                                    logger.debug(
+                                        f"File to sync (older revision): {f_stat.get('depotFile')}, Have: {have_rev_str}, Head: {head_rev_str}")
+                                    files_to_sync_count += 1
+                            except ValueError:
+                                logger.warning(
+                                    f"Could not compare revisions for {f_stat.get('depotFile')}: have='{have_rev_str}', head='{head_rev_str}'")
+                    # else:
+                    # logger.debug(f"No headRev for {f_stat.get('depotFile')}, likely not in depot or error in fstat.")
+
+                # else: fstat might return string messages for errors on individual files, or for general errors.
+                # P4Python's run_fstat usually raises an exception for general errors.
+
+        except Exception as e:
+            logger.error(f"General error getting sync count for Task ID {task_id}: {e}")
+            return 0  # Or an "N/A" indicator
+
+        logger.debug(f"Task ID: {task_id} - Files to Sync: {files_to_sync_count}")
+        return files_to_sync_count
+
     def refresh_entity_preset_tabs(self):
+        logger.debug("Refreshing entity preset tabs...")
+        current_tab_widget = self.ui.entity_preset_tabs.currentWidget()
+        if not current_tab_widget:
+            return
+
+        # Find the QTreeView within the current tab
+        view = current_tab_widget.findChild(QTreeView)
+        if not view:
+            return
+
+        proxy_model = view.model()
+        if not proxy_model:
+            return
+        source_model = proxy_model.sourceModel()
+
+        # Get current preset name (assuming tab text is preset name)
+        current_tab_index = self.ui.entity_preset_tabs.currentIndex()
+        preset_name = self.ui.entity_preset_tabs.tabText(current_tab_index)
+
+        logger.debug(f"Refreshing '{preset_name}' preset tab.")
+
+        if preset_name == "My Tasks":
+            if not hasattr(source_model, 'rowCount'):  # Basic check if it's a model
+                logger.warning("My Tasks source model is not valid for rowCount.")
+                return
+
+            logger.debug(f"Found {source_model.rowCount()} rows in 'My Tasks' model.")
+            for i in range(source_model.rowCount()):
+                model_index_col0 = source_model.index(i, 0)  # Name column
+                model_index_col1 = source_model.index(i, 1)  # "To Sync" column
+
+                sg_item = shotgun_model.get_sg_data(model_index_col0)  # This is the Task item
+
+                files_to_sync_count_val = "N/A"  # Default
+                if sg_item and sg_item.get("type") == "Task":
+                    # Use the new method for "My Tasks" that does targeted queries
+                    files_to_sync_count = self._get_sync_count_for_task(sg_item)
+                    files_to_sync_count_val = str(files_to_sync_count) if files_to_sync_count >= 0 else "N/A"
+                # else:
+                # logger.debug(f"Item at row {i} is not a Task or is invalid: {sg_item}")
+                # files_to_sync_count = self._get_files_to_sync_for_item(sg_item) # Fallback if needed, but likely not for "My Tasks"
+                # files_to_sync_count_val = str(files_to_sync_count) if files_to_sync_count >= 0 else "N/A"
+
+                # Update the "To Sync" column (column 1)
+                # Ensure the item for column 1 exists, create if not
+                current_item_col1 = source_model.itemFromIndex(model_index_col1)
+                if not current_item_col1:
+                    current_item_col1 = QtGui.QStandardItem(files_to_sync_count_val)
+                    source_model.setItem(i, 1, current_item_col1)
+                else:
+                    current_item_col1.setText(files_to_sync_count_val)
+
+                # Optional: Align text to center or right for the count
+                current_item_col1.setTextAlignment(QtCore.Qt.AlignCenter)
+            logger.debug(f"Finished refreshing '{preset_name}' preset tab.")
+        # else:
+        # Handle other presets if they also need similar updates, though they might not have a "To Sync" column.
+        # logger.debug(f"Preset '{preset_name}' does not have special 'To Sync' column handling.")
+
+        logger.debug("Entity preset tabs refresh complete.")
+
+    def refresh_entity_preset_tabs_original(self):
         """
         Refreshes the data displayed in the entity preset tabs, specifically
         updating the 'To Sync' count for the 'My Tasks' preset.
@@ -7888,6 +8060,222 @@ class AppDialog(QWidget):
         # ----------------
 
     def _load_entity_presets(self):
+        """
+        Loads the entity presets from the configuration and sets up buttons and models
+        based on the config.
+        """
+        app = sgtk.platform.current_bundle()
+
+        for setting_dict in app.get_setting("entities"):
+
+            # Validate that the setting dictionary contains all items needed.
+            # ... (validation code remains the same) ...
+
+            key_error_msg = (
+                "Configuration error: 'entities' item %s is missing key '%s'!"
+            )
+            value_error_msg = "Configuration error: 'entities' item %s key '%s' has an invalid value '%s'!"
+
+            key = "caption"
+            if key not in setting_dict:
+                raise TankError(key_error_msg % (setting_dict, key))
+
+            preset_name = setting_dict["caption"]
+
+            key = "type"
+            if key in setting_dict:
+                value = setting_dict[key]
+                if value not in ("Hierarchy", "Query"):
+                    raise TankError(value_error_msg % (setting_dict, key, value))
+                type_hierarchy = value == "Hierarchy"
+            else:
+                type_hierarchy = False  # Default to "Query"
+
+            if type_hierarchy:
+                key = "root"
+                if key not in setting_dict:
+                    raise TankError(key_error_msg % (setting_dict, key))
+                sg_entity_type = "Project"
+            else:  # Query
+                for key_check in ("entity_type", "hierarchy", "filters"):
+                    if key_check not in setting_dict:
+                        raise TankError(key_error_msg % (setting_dict, key_check))
+                sg_entity_type = setting_dict["entity_type"]
+
+            publish_filters = setting_dict.get("publish_filters", [])  # Default to empty list
+
+            # Create the model.
+            if type_hierarchy:
+                entity_root = self._get_entity_root(setting_dict["root"])
+                (model, proxy_model) = self._setup_hierarchy_model(app, entity_root)
+            else:
+                (model, proxy_model) = self._setup_query_model(app, setting_dict)
+
+            # Add a new tab and its layout
+            logger.debug(f"[PRESET] Creating tab for preset: {preset_name}")
+            tab = QWidget()
+            layout = QVBoxLayout(tab)
+            layout.setSpacing(0)
+            layout.setContentsMargins(0, 0, 0, 0)
+            self.ui.entity_preset_tabs.addTab(tab, preset_name)
+
+            # Create and configure the tree view
+            view = QTreeView(tab)
+            layout.addWidget(view)
+            view.setModel(proxy_model)
+            view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            view.setProperty("showDropIndicator", False)
+            view.setIconSize(QSize(20, 20))
+            view.setStyleSheet("QTreeView::item { padding: 6px; }")
+            view.setUniformRowHeights(True)
+
+            if preset_name == "My Tasks":
+                logger.debug("Special handling for 'My Tasks' preset")
+
+                view.setHeaderHidden(False)
+                # Corrected header resize modes:
+                view.header().setStretchLastSection(False)
+                view.header().setSectionResizeMode(0, QHeaderView.Stretch)  # Name column
+                view.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)  # To Sync column
+
+                view.setSortingEnabled(True)
+                view.sortByColumn(0, Qt.AscendingOrder)
+
+                source_model = proxy_model.sourceModel()
+                # Ensure model has 2 columns
+                if source_model.columnCount() < 2:
+                    source_model.setColumnCount(2)
+                source_model.setHorizontalHeaderLabels(["Name", "To Sync"])
+                logger.debug(f"[PRESET] Set headers: Name, To Sync for '{preset_name}'")
+
+                # --- THIS IS THE CRUCIAL FIX ---
+                # Connect data_refreshed to refresh the 'To Sync' counts for this tab.
+                # This ensures refresh_entity_preset_tabs is called when the model has data.
+                source_model.data_refreshed.connect(self.refresh_entity_preset_tabs)
+                # --------------------------------
+
+                # The synchronous loop that was here previously to populate "To Sync"
+                # is removed. self.refresh_entity_preset_tabs will be called by the
+                # data_refreshed signal when the model's data is ready.
+
+                logger.debug(
+                    f"End of Special handling for 'My Tasks' preset in _load_entity_presets. Sync count will be populated on data_refreshed.")
+
+            else:  # For other presets
+                view.setHeaderHidden(True)
+                # logger.debug(f"[PRESET] Using default view setup for preset: {preset_name}")
+
+            # ... (rest of the preset setup, search widgets, context menus, etc.) ...
+            # Keep references to avoid garbage collection
+            self._dynamic_widgets.extend([model, proxy_model, tab, layout, view])
+
+            # (The rest of the search widget and context menu setup for the preset tab)
+            # ...
+            if not type_hierarchy:
+                # ... (search widget setup for Query type) ...
+                search_layout = QHBoxLayout()
+                layout.addLayout(search_layout)
+                search = MyLineEdit(tab)
+                search.setStyleSheet(
+                    "QLineEdit{ border-width: 1px; "
+                    "background-image: url(:/res/search.png); "
+                    "background-repeat: no-repeat; "
+                    "background-position: center left; "
+                    "border-radius: 5px; "
+                    "padding-left:20px; "
+                    "margin:4px; "
+                    "height:22px; "
+                    "}"
+                )
+                search.setToolTip("Use the <i>search</i> field to narrow down the items displayed in the tree above.")
+                try:
+                    search.setPlaceholderText("Search...")
+                except AttributeError:
+                    pass  # Older Qt
+                search_layout.addWidget(search)
+                search_button = QPushButton("Search", tab)
+                search_button.setToolTip("Click to search for items displayed in the tree above.")
+                search_layout.addWidget(search_button)
+                clear_search = QToolButton(tab)
+                icon = QIcon(":/res/clear_search.png")
+                clear_search.setIcon(icon)
+                clear_search.setAutoRaise(True)
+                clear_search.clicked.connect(lambda checked=True, editor=search: editor.setText(""))
+                clear_search.setToolTip("Click to clear your current search.")
+                search_layout.addWidget(clear_search)
+                search.returnPressed.connect(lambda v=view, pm=proxy_model, s=search: self.trigger_search(v, pm, s))
+                search_button.clicked.connect(lambda v=view, pm=proxy_model, s=search: self.trigger_search(v, pm, s))
+                self._dynamic_widgets.extend([search_layout, search, search_button, clear_search, icon])
+            else:  # Hierarchy type
+                search_hierarchical = shotgun_search_widget.HierarchicalSearchWidget(tab)
+                search_hierarchical.search_root = entity_root
+                search_hierarchical.node_activated.connect(
+                    lambda et, eid, n, pl, ip, v=view, pm=proxy_model: self._node_activated(ip, v, pm)
+                )
+                model.async_item_retrieval_completed.connect(
+                    lambda item, v=view, pm=proxy_model: self._async_item_retrieval_completed(item, v, pm)
+                )
+                search_hierarchical.set_bg_task_manager(self._task_manager)
+                layout.addWidget(search_hierarchical)
+                self._dynamic_widgets.append(search_hierarchical)
+
+            # Context menu setup
+            def action_hovered(action):  # Helper for tooltips
+                tip = action.toolTip()
+                if tip == action.text() or not tip:
+                    QToolTip.hideText()
+                else:
+                    QToolTip.showText(QCursor.pos(), tip)
+
+            view_actions = []
+            if type_hierarchy:
+                action_ca_h = QAction("Collapse All Folders", view)
+                action_ca_h.hovered.connect(lambda act=action_ca_h: action_hovered(act))
+                action_ca_h.triggered.connect(view.collapseAll)
+                view_actions.append(action_ca_h)
+                action_reset_h = QAction("Reset", view)
+                action_reset_h.setToolTip("<nobr>Reset tree to root.</nobr>")
+                action_reset_h.hovered.connect(lambda act=action_reset_h: action_hovered(act))
+                action_reset_h.triggered.connect(model.reload_data)
+                view_actions.append(action_reset_h)
+            else:  # Query
+                action_ea_q = QAction("Expand All Folders", view)
+                action_ea_q.hovered.connect(lambda act=action_ea_q: action_hovered(act))
+                action_ea_q.triggered.connect(view.expandAll)
+                view_actions.append(action_ea_q)
+                action_ca_q = QAction("Collapse All Folders", view)
+                action_ca_q.hovered.connect(lambda act=action_ca_q: action_hovered(act))
+                action_ca_q.triggered.connect(view.collapseAll)
+                view_actions.append(action_ca_q)
+                action_refresh_q = QAction("Refresh", view)
+                action_refresh_q.setToolTip("<nobr>Refresh data from ShotGrid.</nobr>")
+                action_refresh_q.hovered.connect(lambda act=action_refresh_q: action_hovered(act))
+                action_refresh_q.triggered.connect(model.async_refresh)
+                view_actions.append(action_refresh_q)
+
+            view.setContextMenuPolicy(Qt.ActionsContextMenu)
+            for act_item in view_actions:
+                view.addAction(act_item)
+            self._dynamic_widgets.extend(view_actions)
+
+            selection_model = view.selectionModel()
+            self._dynamic_widgets.append(selection_model)
+            selection_model.selectionChanged.connect(self._on_treeview_item_selected)
+
+            overlay = ShotgunModelOverlayWidget(model, view)
+            self._dynamic_widgets.append(overlay)
+
+            ep = EntityPreset(preset_name, sg_entity_type, model, proxy_model, view, publish_filters)
+            self._entity_presets[preset_name] = ep
+
+        # Hook up tab change event
+        self.ui.entity_preset_tabs.currentChanged.connect(self._on_entity_profile_tab_clicked)
+
+        # Finalize initialization
+        self._on_home_clicked()
+
+
+    def _load_entity_presets_original(self):
         """
         Loads the entity presets from the configuration and sets up buttons and models
         based on the config.

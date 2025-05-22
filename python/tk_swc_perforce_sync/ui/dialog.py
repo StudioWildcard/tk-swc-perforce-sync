@@ -198,84 +198,7 @@ class Ui_Dialog(object):
         # 1. Add a stretch first to push all subsequent widgets to the right.
         self.top_toolbar.addStretch(1)
 
-        # 2. Instantiate and add the action buttons (refresh, get_latest, submit)
-        # These will now appear on the right, before the navigation buttons.
-        self.refresh_button = QToolButton(self.left_area_widget)
-        self.refresh_button.setMinimumSize(QSize(40, 40))
-        self.refresh_button.setMaximumSize(QSize(40, 40))
-        self.refresh_button.setStyleSheet("QToolButton{\n"
-                                           "   border: none;\n"
-                                           "   background-color: none;\n"
-                                           "   background-repeat: no-repeat;\n"
-                                           "   background-position: center center;\n"
-                                           "   background-image: url(:/res/refresh.png);\n"
-                                           "}\n"
-                                           "\n"
-                                           "QToolButton:hover{\n"
-                                           "background-image: url(:/res/refresh_hover.png);\n"
-                                           "}\n"
-                                           "\n"
-                                           "QToolButton:Pressed {\n"
-                                           "background-image: url(:/res/refresh_pressed.png);\n"
-                                           "}\n"
-                                           "")
-        self.refresh_button.setObjectName("refresh_button")
-        self.top_toolbar.addWidget(self.refresh_button)
 
-        self.get_latest_button = QToolButton(self.left_area_widget)
-        self.get_latest_button.setMinimumSize(QSize(40, 40))
-        self.get_latest_button.setMaximumSize(QSize(40, 40))
-        self.get_latest_button.setStyleSheet("QToolButton{\n"
-                                          "   border: none;\n"
-                                          "   background-color: none;\n"
-                                          "   background-repeat: no-repeat;\n"
-                                          "   background-position: center center;\n"
-                                          "   background-image: url(:/res/get_latest.png);\n"
-                                          "}\n"
-                                          "\n"
-                                          "QToolButton:hover{\n"
-                                          "background-image: url(:/res/get_latest_hover.png);\n"
-                                          "}\n"
-                                          "\n"
-                                          "QToolButton:Pressed {\n"
-                                          "background-image: url(:/res/get_latest_pressed.png);\n"
-                                          "}\n"
-                                          "\n"
-                                          "QToolButton:disabled {\n"
-                                          "background-image: url(:/res/get_latest_disabled.png);\n"
-                                          "}\n"
-                                          "")
-
-        self.get_latest_button.setObjectName("get_latest_button")
-        self.top_toolbar.addWidget(self.get_latest_button)
-
-        self.submit_button = QToolButton(self.left_area_widget)
-        self.submit_button.setMinimumSize(QSize(40, 40))
-        self.submit_button.setMaximumSize(QSize(40, 40))
-        self.submit_button.setStyleSheet("QToolButton{\n"
-                                             "   border: none;\n"
-                                             "   background-color: none;\n"
-                                             "   background-repeat: no-repeat;\n"
-                                             "   background-position: center center;\n"
-                                             "   background-image: url(:/res/submit.png);\n"
-                                             "}\n"
-                                             "\n"
-                                             "QToolButton:hover{\n"
-                                             "background-image: url(:/res/submit_hover.png);\n"
-                                             "}\n"
-                                             "\n"
-                                             "QToolButton:Pressed {\n"
-                                             "background-image: url(:/res/submit_pressed.png);\n"
-                                             "}\n"
-                                             "\n"
-                                             "QToolButton:disabled {\n"
-                                             "background-image: url(:/res/submit_disabled.png);\n"
-                                             "}\n"
-                                             "")
-
-        self.submit_button.setObjectName("submit_button")
-        self.submit_button.setEnabled(False)
-        self.top_toolbar.addWidget(self.submit_button)
 
         self.middle_area_widget = QWidget(self.splitter)
         sizePolicy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -292,6 +215,87 @@ class Ui_Dialog(object):
         self.horizontalLayout_2.setSpacing(1)
         self.horizontalLayout_2.setContentsMargins(0, 0, 0, 0)
         self.horizontalLayout_2.setObjectName("horizontalLayout_2")
+
+        # 2. Instantiate and add the action buttons (refresh, get_latest, submit)
+        # These will now appear on the right, before the navigation buttons.
+        self.refresh_button = QToolButton(self.middle_area_widget)
+        self.refresh_button.setMinimumSize(QSize(40, 40))
+        self.refresh_button.setMaximumSize(QSize(40, 40))
+        self.refresh_button.setStyleSheet("QToolButton{\n"
+                                          "   border: none;\n"
+                                          "   background-color: none;\n"
+                                          "   background-repeat: no-repeat;\n"
+                                          "   background-position: center center;\n"
+                                          "   background-image: url(:/res/refresh.png);\n"
+                                          "}\n"
+                                          "\n"
+                                          "QToolButton:hover{\n"
+                                          "background-image: url(:/res/refresh_hover.png);\n"
+                                          "}\n"
+                                          "\n"
+                                          "QToolButton:Pressed {\n"
+                                          "background-image: url(:/res/refresh_pressed.png);\n"
+                                          "}\n"
+                                          "")
+        self.refresh_button.setObjectName("refresh_button")
+        self.horizontalLayout_2.addWidget(self.refresh_button)
+
+        self.get_latest_button = QToolButton(self.middle_area_widget)
+        self.get_latest_button.setMinimumSize(QSize(40, 40))
+        self.get_latest_button.setMaximumSize(QSize(40, 40))
+        self.get_latest_button.setStyleSheet("QToolButton{\n"
+                                             "   border: none;\n"
+                                             "   background-color: none;\n"
+                                             "   background-repeat: no-repeat;\n"
+                                             "   background-position: center center;\n"
+                                             "   background-image: url(:/res/get_latest.png);\n"
+                                             "}\n"
+                                             "\n"
+                                             "QToolButton:hover{\n"
+                                             "background-image: url(:/res/get_latest_hover.png);\n"
+                                             "}\n"
+                                             "\n"
+                                             "QToolButton:Pressed {\n"
+                                             "background-image: url(:/res/get_latest_pressed.png);\n"
+                                             "}\n"
+                                             "\n"
+                                             "QToolButton:disabled {\n"
+                                             "background-image: url(:/res/get_latest_disabled.png);\n"
+                                             "}\n"
+                                             "")
+
+        self.get_latest_button.setObjectName("get_latest_button")
+        self.horizontalLayout_2.addWidget(self.get_latest_button)
+
+        self.submit_button = QToolButton(self.middle_area_widget)
+        self.submit_button.setMinimumSize(QSize(40, 40))
+        self.submit_button.setMaximumSize(QSize(40, 40))
+        self.submit_button.setStyleSheet("QToolButton{\n"
+                                         "   border: none;\n"
+                                         "   background-color: none;\n"
+                                         "   background-repeat: no-repeat;\n"
+                                         "   background-position: center center;\n"
+                                         "   background-image: url(:/res/submit.png);\n"
+                                         "}\n"
+                                         "\n"
+                                         "QToolButton:hover{\n"
+                                         "background-image: url(:/res/submit_hover.png);\n"
+                                         "}\n"
+                                         "\n"
+                                         "QToolButton:Pressed {\n"
+                                         "background-image: url(:/res/submit_pressed.png);\n"
+                                         "}\n"
+                                         "\n"
+                                         "QToolButton:disabled {\n"
+                                         "background-image: url(:/res/submit_disabled.png);\n"
+                                         "}\n"
+                                         "")
+
+        self.submit_button.setObjectName("submit_button")
+        self.submit_button.setEnabled(False)
+        self.horizontalLayout_2.addWidget(self.submit_button)
+
+
 
         # Spacer to push breadcrumbs to the center
         spacerItem_before_bc = QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum)
@@ -386,7 +390,8 @@ class Ui_Dialog(object):
         self.horizontalLayout_8.setObjectName("horizontalLayout_8")
 
         # Spacer to push breadcrumbs to the center
-        spacerItem_before_bc_8 = QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum)
+        # spacerItem_before_bc_8 = QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum)
+        spacerItem_before_bc_8 = QSpacerItem(8, 20, QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.horizontalLayout_8.addItem(spacerItem_before_bc_8)
 
         self.entity_breadcrumbs = QLabel(self.middle_area_widget)
