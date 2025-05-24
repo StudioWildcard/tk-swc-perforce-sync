@@ -17,7 +17,6 @@ shotgun_model = sgtk.platform.import_framework(
 )
 ShotgunModel = shotgun_model.ShotgunModel
 
-
 class SgPublishTypeModel(ShotgunModel):
     """
     This model holds all the publish types. It is connected to the filter UI where
@@ -47,7 +46,7 @@ class SgPublishTypeModel(ShotgunModel):
             bg_load_thumbs=True,
             bg_task_manager=bg_task_manager,
         )
-
+        self._log = sgtk.LogManager.get_logger(self.__class__.__name__)
         self._action_manager = action_manager
         self._settings_manager = settings_manager
 
@@ -93,7 +92,6 @@ class SgPublishTypeModel(ShotgunModel):
         """
         Destructor
         """
-
         # save filter settings
         val = []
         for idx in range(self.rowCount()):
@@ -135,14 +133,11 @@ class SgPublishTypeModel(ShotgunModel):
         """
         for idx in range(self.rowCount()):
             item = self.item(idx)
-
             # ignore special case folders item
             if item.text() != SgPublishTypeModel.FOLDERS_ITEM_TEXT:
                 continue
-
             if item.checkState() == QtCore.Qt.Checked:
                 return True
-
         return False
 
     def get_selected_types(self):
@@ -154,66 +149,52 @@ class SgPublishTypeModel(ShotgunModel):
         type_ids = []
         for idx in range(self.rowCount()):
             item = self.item(idx)
-
             # ignore special case folders item
             if item.text() == SgPublishTypeModel.FOLDERS_ITEM_TEXT:
                 continue
-
             if item.checkState() == QtCore.Qt.Checked:
                 # get the shotgun id
-                associated_sg_ids = item.get_sg_data()["ids"]
+                associated_sg_ids = shotgun_model.get_sg_data(item).get("ids", [])
+                if not associated_sg_ids:
+                    self._log.warning(f"No 'ids' found in Shotgun data for item: {shotgun_model.get_sg_data(item)}")
                 type_ids.extend(associated_sg_ids)
-
         return type_ids
 
-    def set_active_types(self, type_aggregates):
+    def set_active_types(self, type_id_aggregates):
         """
         Specifies which types are currently active. Also adjust the sort role,
         so that the view puts enabled items at the top of the list!
 
-        :param type_aggregates: dict keyed by type id with value being the number of
-                                of occurances of that type in the currently displayed result
+        :param type_id_aggregates: List of publish type IDs present in the publish data.
         """
-        # iterate over all types in the list
         for idx in range(self.rowCount()):
-
             item = self.item(idx)
-
             # ignore special folders item
             if item.text() == SgPublishTypeModel.FOLDERS_ITEM_TEXT:
                 continue
-
             # get list of shotgun publish type ids associated with this
-            sg_type_ids = shotgun_model.get_sg_data(item)["ids"]
-            display_name = shotgun_model.get_sanitized_data(
-                item, self.DISPLAY_NAME_ROLE
-            )
-
-            # check if any of the ids associated with this entry is in the the type_aggregates list
-            # at the same time aggregate the totals so that if we have two "maya anim" active, we display
-            # the total sum of publishes of both types in the aggregation summary
-            total_matches = 0
-            for type_id in sg_type_ids:
-                if type_id in type_aggregates:
-                    total_matches += type_aggregates[type_id]
-
+            sg_data = shotgun_model.get_sg_data(item)
+            sg_type_ids = sg_data.get("ids", [])
+            if not sg_type_ids:
+                self._log.warning(f"No 'ids' found in Shotgun data for item: {sg_data}")
+                item.setEnabled(False)
+                item.setText(f"{sg_data.get('code', 'Unnamed')} (0)")
+                item.setData(f"b_{sg_data.get('code', 'Unnamed')}", SgPublishTypeModel.SORT_KEY_ROLE)
+                continue
+            display_name = shotgun_model.get_sanitized_data(item, self.DISPLAY_NAME_ROLE)
+            # count matches between item's ids and aggregates
+            total_matches = sum(1 for type_id in sg_type_ids if str(type_id) in [str(agg_id) for agg_id in type_id_aggregates])
             if total_matches > 0:
-                # there are matches for this publish type! Add it to the active section
-                # of the filter list.
-                item.setData("a_%s" % display_name, SgPublishTypeModel.SORT_KEY_ROLE)
+                # there are matches for this publish type
+                item.setData(f"a_{display_name}", SgPublishTypeModel.SORT_KEY_ROLE)
                 item.setEnabled(True)
-
-                # display name with aggregate summary
-                item.setText("%s (%d)" % (display_name, total_matches))
-
+                item.setText(f"{display_name} ({total_matches})")
             else:
                 # this type is not found in the list of current matches
                 item.setEnabled(False)
-                item.setData("b_%s" % display_name, SgPublishTypeModel.SORT_KEY_ROLE)
-                # disply name with no aggregate
-                item.setText("%s (0)" % display_name)
-
-        # and ask the model to resort itself
+                item.setData(f"b_{display_name}", SgPublishTypeModel.SORT_KEY_ROLE)
+                item.setText(f"{display_name} (0)")
+        # ask the model to resort itself
         self.sort(0)
 
     def hard_refresh(self):
@@ -228,15 +209,8 @@ class SgPublishTypeModel(ShotgunModel):
 
     def _load_external_data(self):
         """
-        Called whenever the model needs to be rebuilt from scratch. This is called prior
-        to any shotgun data is added to the model. This makes it possible for deriving classes
-        to add custom data to the model in a very flexible fashion. Such data will not be
-        cached by the ShotgunModel framework.
+        Called whenever the model needs to be rebuilt from scratch.
         """
-
-        # process the folder data and add that to the model. Keep local references to the
-        # items to keep the GC happy.
-
         self._folder_items = []
         item = shotgun_model.ShotgunStandardItem(SgPublishTypeModel.FOLDERS_ITEM_TEXT)
         item.setCheckable(True)
@@ -251,55 +225,24 @@ class SgPublishTypeModel(ShotgunModel):
 
     def _before_data_processing(self, sg_data_list):
         """
-        Called just after data has been retrieved from Shotgun but before any processing
-        takes place.
-
-        For the publish type model, this will cull out any publish types that are not relevant
-        based on the action settings. So if you are in nuke, maya centric file types will not be shown.
-
-        In addition, any two types having the same name will be collapsed into one, so that
-        you don't end up with dupes in the UI. As part of this collapse, a special field "ids"
-        is added to the list. This field contains a list of the publish ids associated with each
-        entry.
-
-        :param sg_data_list: list of shotgun dictionaries, as returned by the find() call.
-        :returns: returns a list of shotgun dictionaries, on the same form as the input.
-
+        Cull out irrelevant publish types and collapse duplicates.
         """
-        # go through each type and check if it is known by our action mappings
         sg_data_handled_types = {}
-
         for sg_data in sg_data_list:
             sg_code = sg_data.get("code")
             if self._action_manager.has_actions(sg_code):
-                # there are actions for this file type!
                 if sg_code in sg_data_handled_types:
-                    # we already have this name registered once. So add its id
                     sg_data_handled_types[sg_code]["ids"].append(sg_data["id"])
-
                 else:
-                    # register with dictionary
                     sg_data_handled_types[sg_code] = sg_data
-                    # set up a special 'field' in the sg data which holds all
-                    # the ids associated with this name. The goal is to
-                    # not include multiple entries with the same name but
-                    # instead collate them into a single entry
                     sg_data_handled_types[sg_code]["ids"] = [sg_data["id"]]
-
         return list(sg_data_handled_types.values())
 
     def _finalize_item(self, item):
         """
-        Called whenever an item is fully constructed, either because a shotgun query returned it
-        or because it was loaded as part of a cache load from disk.
-
-        :param item: QStandardItem that is about to be added to the model. This has been primed
-                     with the standard settings that the ShotgunModel handles.
+        Called whenever an item is fully constructed.
         """
-        # When items are born they are all disabled by default
         item.setEnabled(False)
-
-        # check if we have stored any deselections from previous sessions
         sg_data = item.get_sg_data()
         if sg_data and sg_data.get("code") not in self._deselected_pub_types:
             item.setCheckState(QtCore.Qt.Checked)
@@ -308,20 +251,12 @@ class SgPublishTypeModel(ShotgunModel):
 
     def _populate_item(self, item, sg_data):
         """
-        Whenever an item is constructed, this method is called. It allows subclasses to intercept
-        the construction of a QStandardItem and add additional metadata or make other changes
-        that may be useful. Nothing needs to be returned.
-
-        :param item: QStandardItem that is about to be added to the model. This has been primed
-                     with the standard settings that the ShotgunModel handles.
-        :param sg_data: Shotgun data dictionary that was received from Shotgun given the fields
-                        and other settings specified in load_data()
+        Populate item with metadata.
         """
         sg_code = sg_data.get("code")
         if sg_code is None:
             sg_name_formatted = "Unnamed"
         else:
             sg_name_formatted = sg_code
-
         item.setData(sg_name_formatted, SgPublishTypeModel.DISPLAY_NAME_ROLE)
         item.setCheckable(True)
