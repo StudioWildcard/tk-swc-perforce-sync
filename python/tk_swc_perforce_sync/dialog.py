@@ -3118,8 +3118,8 @@ class AppDialog(QWidget):
                         processed_keys.add(key)
                 # else: logger.warning(f"Could not determine key for SG item: {sg_item.get('code')}")
 
-
-        # 2. Process data *only* in self._fstat_dict (Perforce files not in SG data)
+        """
+        # 2. Process data only in self._fstat_dict (Perforce files not in SG data)
         for key, fstat_item in self._fstat_dict.items():
             if key not in processed_keys:
                 # This item exists in Perforce but wasn't in the SG query result
@@ -3142,7 +3142,7 @@ class AppDialog(QWidget):
                         combined_sg_data.append(fstat_item)
                     # else: logger.warning(f"fstat item {key} missing clientFile")
 
-
+        """
 
         length = len(combined_sg_data)
         # logger.debug(f"Combined data length: {length}")
@@ -10301,8 +10301,10 @@ class AppDialog(QWidget):
         return publish_type
 
     def _get_p4_status(self, p4_status):
-        return self.status_dict.get(p4_status.lower(), None)
-
+        status = self.status_dict.get(p4_status, None)
+        if status:
+            return status.lower()
+        return None
 
     def _get_item_path (self, local_path):
         """
