@@ -1126,10 +1126,33 @@ class AppDialog(QWidget):
 
     ########################################################################################
     # info bar related
+    def _get_default_change(self):
+
+        max_retries = 3
+        default_changelist = None
+        try:
+            for attempt in range(max_retries):
+                default_changelist = self._p4.fetch_change()
+                if not default_changelist:
+                    time.sleep(0.5)
+                    continue
+                else:
+                    break
+
+        except:
+            pass
+        return default_changelist
+
     def _get_default_changelists(self):
-        default_changelist = self._p4.fetch_change()
+
         key = "default"
         self._change_dict[key] = []
+        # default_changelist = self._p4.fetch_change()
+        default_changelist = self._get_default_change()
+        if not default_changelist:
+            logger.debug("<<<<<<<  Unable to get default changelist")
+            return
+
         sg_item = {}
         sg_item['changeListInfo'] = True
         sg_item['headTime'] = default_changelist.get('time', None)
@@ -1184,18 +1207,89 @@ class AppDialog(QWidget):
 
             # logger.debug("key {}:{}".format(key, self._change_dict[key]))
 
+    def get_client_name(self):
+        max_retries = 5
+        client = None
+        try:
+            for attempt in range(max_retries):
+                client = self._p4.fetch_client()
+                if not client:
+                    time.sleep(0.3)
+                    continue
+                else:
+                    break
+        except:
+            pass
+        return client
+
+    def get_change_lists(self, workspace):
+        max_retries = 5
+        change_lists = None
+        try:
+            for attempt in range(max_retries):
+                change_lists = self._p4.run_changes("-l", "-s", "pending", "-c", workspace)
+                if not change_lists:
+                    time.sleep(0.3)
+                    continue
+                else:
+                    break
+        except:
+            pass
+        return change_lists
+
+    def get_desc_files(self, key):
+        max_retries = 3
+        desc_files = None
+        try:
+            for attempt in range(max_retries):
+                desc_files = self._p4.run("describe", "-O", key)
+                if not desc_files:
+                    time.sleep(0.3)
+                    continue
+                else:
+                    break
+        except:
+            pass
+        return desc_files
+
+    def get_fstat_list(self, depot_file):
+        max_retries = 3
+        fstat_list = None
+        try:
+            for attempt in range(max_retries):
+                fstat_list = self._p4.run("fstat", depot_file)
+                if not fstat_list:
+                    time.sleep(0.3)
+                    continue
+                else:
+                    break
+        except:
+            pass
+        return fstat_list
+
     def _get_pending_changelists(self):
 
-        client = self._p4.fetch_client()
+        client = self.get_client_name()
+        if not client:
+            logger.debug("<<<<<<<  Unable to get client")
+            return
+
         workspace = client.get("Client", None)
         # Get the pending changelists
-        change_lists = self._p4.run_changes("-l", "-s", "pending", "-c", workspace)
+        change_lists = self.get_change_lists(workspace)
+        # change_lists = self._p4.run_changes("-l", "-s", "pending", "-c", workspace)
         # logger.debug("<<<<<<<  change_lists: {}".format(change_lists))
+        if not change_lists:
+            logger.debug("<<<<<<<  Unable to get pending changelists")
+            return
+
 
         for change_list in change_lists:
             key = change_list.get("change", None)
             #logger.debug("{}".format(key))
-            desc_files = self._p4.run("describe", "-O", key)
+            # desc_files = self._p4.run("describe", "-O", key)
+            desc_files = self.get_desc_files(key)
+
             # logger.debug(">>>> desc_files: {}".format(depot_file))
             if desc_files:
 
@@ -1222,7 +1316,8 @@ class AppDialog(QWidget):
 
                         for depot_file, rev, action in change_file_info:
                             if depot_file:
-                                fstat_list = self._p4.run("fstat", depot_file)
+                                # fstat_list = self._p4.run("fstat", depot_file)
+                                fstat_list = self.get_fstat_list(depot_file)
                                 if fstat_list:
                                     fstat = fstat_list[0]
                                     client_file = self._get_client_file(depot_file)
@@ -2150,7 +2245,7 @@ class AppDialog(QWidget):
                 process.wait()
 
             except Exception as e:
-                logger.error(f"Sync failed: {e}")
+                # logger.error(f"Sync failed: {e}")
                 self._add_log(
                     f"\n <span style='color:#CC3333'>Sync failed: {e}</span> \n", 2)
 
@@ -2173,7 +2268,7 @@ class AppDialog(QWidget):
         self.refresh_entity_preset_tabs()
         self._add_log("\n <span style='color:#2C93E2'>Reloading data is complete.</span> \n", 2)
 
-    def _on_sync_current(self):
+    def _on_sync_current_original(self):
         """
         Finds the currently selected entity, determines its Perforce depot path,
         and syncs the files within that path that need updating.
@@ -2264,6 +2359,99 @@ class AppDialog(QWidget):
         # self.refresh_entity_preset_tabs()
         #self._add_log("\n <span style='color:#2C93E2'>Reloading data is complete.</span> \n", 2)
 
+    def _on_sync_current(self):
+        """
+        Finds the currently selected entity, determines its Perforce depot path,
+        and syncs the files within that path that need updating.
+        """
+        logger.info("Starting sync for the current selection...")
+        entity_path, entity_id, entity_type = self._get_selected_entity_path_info()
+        logger.info(f"Selected Entity path {entity_path}")
+
+        if not entity_path:
+            logger.warning("No valid path found for the selected entity.")
+            self._add_log(
+                "\n <span style='color:#FFD700'>No valid path found for the selected entity.</span> \n", 2)
+            return
+
+        # Convert local path to Perforce depot path
+        depot_path_base = self._convert_local_to_depot(entity_path)
+        if not depot_path_base:
+            logger.error(f"Could not convert local path '{entity_path}' to a Perforce depot path.")
+            self._add_log(
+                f"\n <span style='color:#CC3333'>Error: Could not map '{entity_path}' to a Perforce path.</span> \n", 2)
+            return
+
+        # Build Perforce wildcard path
+        depot_path_wildcard = depot_path_base.rstrip('/') + '/...'
+        logger.info(f"[SYNC CHECK] Running dry-run sync on: {depot_path_wildcard}")
+
+        # Run dry-run sync to list files
+        try:
+            if not self._p4.connected():
+                self._p4.connect()
+            sync_output = self._p4.run_sync("-n", depot_path_wildcard)
+            if not isinstance(sync_output, list):
+                logger.error(
+                    f"[SYNC CHECK] Expected list of files, got {type(sync_output)} for path {depot_path_wildcard}")
+                self._add_log(
+                    f"\n <span style='color:#CC3333'>Dry-run sync failed: Invalid response for {depot_path_wildcard}</span> \n",
+                    2)
+                return
+            depot_files = [entry.get("depotFile") for entry in sync_output if "depotFile" in entry]
+            num_files = len(depot_files)
+        except Exception as e:
+            #logger.error(f"[SYNC CHECK] Exception during sync check for entity path {entity_path}: {e}")
+            #self._add_log(
+            #    f"\n <span style='color:#CC3333'>Dry-run sync failed: {e}</span> \n", 2)
+            return
+
+        logger.info(f"Total files to sync: {num_files}")
+        self._add_log(f"\n <span style='color:#2C93E2'>Found {num_files} files that need syncing.</span> \n", 2)
+
+        if depot_files:
+            logger.info("Files to sync:")
+            for i, path in enumerate(depot_files, 1):
+                msg = f"[{i:02}] {path}"
+                self._add_log(msg, 3)
+        else:
+            logger.info("No individual depot files found in sync output.")
+            self._add_log("\n <span style='color:#2C93E2'>No files to sync.</span> \n", 2)
+            self._update_progress(100)
+            self._after_syncing_operations()
+            return
+
+        # Define sync logic in thread
+        def sync_thread_fn():
+            try:
+                # Sync files one by one to track progress
+                for i, depot_file in enumerate(depot_files, 1):
+                    # Skip syncing if a new sync operation has started
+                    if not hasattr(self, '_sync_active') or not self._sync_active:
+                        logger.info("Sync operation cancelled due to new sync request.")
+                        return
+
+                    # Sync individual file
+                    self._p4.run_sync(depot_file)
+                    progress = (i / num_files) * 100
+                    file_name = depot_file.split('/')[-1]
+                    msg = f"Syncing {file_name} ({i}/{num_files})" if logger.isEnabledFor(
+                        logging.DEBUG) else f"({i}/{num_files}) Syncing..."
+                    self._add_log(msg, 3)
+                    self._update_progress(progress)
+            except Exception as e:
+                logger.error(f"Sync failed: {e}")
+                self._add_log(
+                    f"\n <span style='color:#CC3333'>Sync failed: {e}</span> \n", 2)
+            finally:
+                self._sync_active = False
+                self._add_log("\n <span style='color:#2C93E2'>Sync complete for current selection.</span> \n", 2)
+                self._after_syncing_operations()
+
+        # Set sync active flag and start thread
+        self._sync_active = True
+        sync_thread = threading.Thread(target=sync_thread_fn)
+        sync_thread.start()
 
     def _get_selected_entity_path_info(self):
         """
@@ -3050,7 +3238,7 @@ class AppDialog(QWidget):
             return changelist, description
         return None
 
-    def _populate_column_view_widget(self):
+    def _populate_column_view_widget_2(self):
         """
         Populates the column view using self._sg_data merged with self._fstat_dict.
         """
@@ -3119,7 +3307,7 @@ class AppDialog(QWidget):
                 # else: logger.warning(f"Could not determine key for SG item: {sg_item.get('code')}")
 
         """
-        # 2. Process data only in self._fstat_dict (Perforce files not in SG data)
+        # 2. Process data *only* in self._fstat_dict (Perforce files not in SG data)
         for key, fstat_item in self._fstat_dict.items():
             if key not in processed_keys:
                 # This item exists in Perforce but wasn't in the SG query result
@@ -3142,8 +3330,8 @@ class AppDialog(QWidget):
                         combined_sg_data.append(fstat_item)
                     # else: logger.warning(f"fstat item {key} missing clientFile")
 
-        """
 
+        """
         length = len(combined_sg_data)
         # logger.debug(f"Combined data length: {length}")
         # logger.debug(f"Sample combined data item: {combined_sg_data[0] if combined_sg_data else 'None'}")
@@ -3163,6 +3351,11 @@ class AppDialog(QWidget):
             # --- Iterate over combined_sg_data ---
             for sg_item in combined_sg_data:
                 # Determine the key (prefer SG ID, fallback to fstat key)
+                logger.debug(f">>>>>------------------------------------------------------------")
+                logger.debug(f">>>>>  sg_item data is")
+                for k, v in sg_item.items():
+                    logger.debug(f">>>>>  {k}: {v}")
+
                 item_id = sg_item.get("id")
                 item_key = item_id # Default to SG ID
 
@@ -3206,7 +3399,7 @@ class AppDialog(QWidget):
              # Ensure the view is cleared if no data
              self.column_view_model.setRowCount(0) # Clear the view model directly
 
-    def _populate_column_view_widget_original(self):
+    def _populate_column_view_widget(self):
         #self._publish_model.hard_refresh()
         self._column_view_dict = {}
         self._standard_item_dict = {}
@@ -7318,13 +7511,25 @@ class AppDialog(QWidget):
         for p in processes:
             p.wait()
 
-    def _update_progress(self, value):
+    def _update_progress_original(self, value):
         if 100 > value > 0:
             self.ui.progress.setValue(value)
             self.ui.progress.setVisible(True)
         else:
             self.ui.progress.setVisible(False)
         QCoreApplication.processEvents()
+
+    def _update_progress(self, value):
+        """
+        Updates the progress bar with the given value, ensuring thread-safe UI updates.
+
+        Args:
+            value (float): Progress value between 0 and 100.
+        """
+        if not hasattr(self, '_progress_updater'):
+            self._progress_updater = ProgressUpdater(self.ui.progress, self)
+        self._progress_updater.update_progress.emit(value)
+        QtCore.QCoreApplication.processEvents()
 
     def send_error_message(self, text):
         """
@@ -7337,7 +7542,7 @@ class AppDialog(QWidget):
         msg = "\n <span style='color:#d45239'>{}:</span> \n".format(text)
         self._add_log(msg, 2)
 
-    def _add_log(self, msg, flag):
+    def _add_log_original(self, msg, flag):
         if flag <= 2:
             msg = "\n{}\n".format(msg)
         else:
@@ -7347,6 +7552,19 @@ class AppDialog(QWidget):
         #    logger.debug(msg)
         self.ui.log_window.verticalScrollBar().setValue(self.ui.log_window.verticalScrollBar().maximum())
         QCoreApplication.processEvents()
+
+    def _add_log(self, msg, flag):
+        """
+        Adds a message to the log window, ensuring thread-safe UI updates.
+
+        Args:
+            msg (str): The log message to display.
+            flag (int): The log level for formatting (1-2: add newlines, 3+: no newlines).
+        """
+        if not hasattr(self, '_log_updater'):
+            self._log_updater = LogUpdater(self)
+        self._log_updater.updateLog.emit(msg, flag)
+        QtCore.QCoreApplication.processEvents()
 
     def _to_sync (self, have_rev, head_rev):
         """
@@ -8288,7 +8506,7 @@ class AppDialog(QWidget):
             return sync_count
 
         except Exception as e:
-            logger.warning(f"[SYNC CHECK] Exception during sync check for entity path {key}: {e}")
+            # logger.warning(f"[SYNC CHECK] Exception during sync check for entity path {key}: {e}")
             return 0
 
     def trigger_search(self, view, proxy_model, search):
@@ -9122,8 +9340,11 @@ class AppDialog(QWidget):
         #logger.debug(">>>>>>>>>>  _get_perforce_data: START")
         msg = "\n <span style='color:#2C93E2'>Retrieving Data from Perforce...</span> \n"
         self._add_log(msg, 2)
-        self._get_perforce_data()
-        msg = "\n <span style='color:#2C93E2'>Perforce Data Retrieval Completed Successfully</span> \n"
+        try:
+            self._get_perforce_data()
+            msg = "\n <span style='color:#2C93E2'>Perforce Data Retrieval Completed Successfully</span> \n"
+        except:
+            msg = "\n <span style='color:#2C93E2'>Perforce Data Retrieval Failed</span> \n"
         self._add_log(msg, 2)
 
         """
@@ -9233,7 +9454,7 @@ class AppDialog(QWidget):
 
             #self._submitted_data_to_publish.append(sg_item)
 
-    def _get_submitted_changelists(self, folder_path):
+    def _get_submitted_changelists_original(self, folder_path):
 
         changes = self._p4.run_changes('-s', 'submitted', folder_path + '/...')
 
@@ -9242,6 +9463,22 @@ class AppDialog(QWidget):
             if key not in self._submitted_changes:
                 self._submitted_changes[key] = change
 
+    def _get_submitted_changelists(self, folder_path):
+        try:
+            if not self._p4.connected():
+                self._p4.connect()
+            changes = self._p4.run_changes('-s', 'submitted', f"{folder_path}/...")
+            if not isinstance(changes, list):
+                logger.error(f"Expected list of changes, got {type(changes)} for path {folder_path}")
+                return []
+            for change in changes:
+                key = change.get('change')
+                if key and key not in self._submitted_changes:
+                    self._submitted_changes[key] = change
+            return changes
+        except Exception as e:
+            logger.error(f"Failed to retrieve submitted changelists for {folder_path}: {e}")
+            return []
 
     def _get_depot_files_to_publish(self):
         for key, sg_item in self._fstat_dict.items():
@@ -10204,17 +10441,19 @@ class AppDialog(QWidget):
         self._submitted_data_to_publish = []
 
         logger.debug("Entity path is: {}".format(self._entity_path))
-
-        if self._entity_path:
-            self._item_path_dict[self._entity_path] += 1
-        elif self._sg_data:
-            for sg_item in self._sg_data:
-                sg_item_path = sg_item.get("path", None)
-                if sg_item_path:
-                    local_path = sg_item_path.get("local_path", None)
-                    if local_path:
-                        item_path = os.path.dirname(local_path)
-                        self._item_path_dict[item_path] += 1
+        try:
+            if self._entity_path:
+                self._item_path_dict[self._entity_path] += 1
+            elif self._sg_data:
+                for sg_item in self._sg_data:
+                    sg_item_path = sg_item.get("path", None)
+                    if sg_item_path:
+                        local_path = sg_item_path.get("local_path", None)
+                        if local_path:
+                            item_path = os.path.dirname(local_path)
+                            self._item_path_dict[item_path] += 1
+        except Exception as e:
+            pass
 
         for key in self._item_path_dict:
             if key:
@@ -10222,45 +10461,66 @@ class AppDialog(QWidget):
                 key = self._convert_local_to_depot(key)
                 #logger.debug(">>>>>>>>>> Converted key is: {}".format(key))
                 key = key.rstrip('/')
+                """
                 #logger.debug(">>>>>>>>>> modifed key is: {}".format(key))
                 fstat_list = self._p4.run_fstat('-Of', key + '/...')
                 self._get_submitted_changelists(key)
                 # logger.debug(">>>>>>>>>>  self._submitted_changes is: {}".format(self._submitted_changes))
+                """
+                # Retry fstat to handle transient failures
+                max_retries = 3
+                fstat_list = None
+                try:
+                    for attempt in range(max_retries):
+                            fstat_list = self._p4.run_fstat('-Of', key + '/...')
+                            if not isinstance(fstat_list, list):
+                                time.sleep(0.5)
+                                continue
+                            else:
+                                break
 
-                for fstat in fstat_list:
-                    if isinstance(fstat, list) and len(fstat) == 1:
-                        fstat = fstat[0]
+                    if not isinstance(fstat_list, list):
+                        # logger.error(f"Failed to retrieve fstat for {key} after {max_retries} attempts")
+                        self._add_log(f"\n <span style='color:#CC3333'>Error: Failed to retrieve file status for {key} after {max_retries} retries.</span> \n",2)
+                        fstat_list = []
+                except Exception as e:
+                    fstat_list = []
 
-                    client_file = fstat.get('clientFile', None)
+                if fstat_list:
+                    for fstat in fstat_list:
+                        if isinstance(fstat, list) and len(fstat) == 1:
+                            fstat = fstat[0]
 
-                    if client_file:
-                        newkey = self._create_key(client_file)
-                        head_rev = fstat.get('headRev', "0")
-                        newkey = "{}#{}".format(newkey, head_rev)
-                        have_rev = fstat.get('haveRev', "0")
+                        client_file = fstat.get('clientFile', None)
 
-                        if newkey not in self._fstat_dict:
-                            self._fstat_dict[newkey] = fstat
-                            self._fstat_dict[newkey]['Published'] = False
-                            self._fstat_dict[newkey]["revision"] = "#{}/{}".format(have_rev, head_rev)
-                            #self._fstat_dict[newkey]["code"] = "{}#{}".format(fstat.get("name", None),head_rev)
-                            #self._fstat_dict[newkey]["depot_file_type"] = self._get_publish_type(client_file)
-                            #self._fstat_dict[newkey]["name"] = os.path.basename(client_file)
-                            #self._fstat_dict[newkey]["path"] = {}
-                            #self._fstat_dict[newkey]["path"]["local_path"] = client_file
+                        if client_file:
+                            newkey = self._create_key(client_file)
+                            head_rev = fstat.get('headRev', "0")
+                            newkey = "{}#{}".format(newkey, head_rev)
+                            have_rev = fstat.get('haveRev', "0")
+
+                            if newkey not in self._fstat_dict:
+                                self._fstat_dict[newkey] = fstat
+                                self._fstat_dict[newkey]['Published'] = False
+                                self._fstat_dict[newkey]["revision"] = "#{}/{}".format(have_rev, head_rev)
+                                #self._fstat_dict[newkey]["code"] = "{}#{}".format(fstat.get("name", None),head_rev)
+                                #self._fstat_dict[newkey]["depot_file_type"] = self._get_publish_type(client_file)
+                                #self._fstat_dict[newkey]["name"] = os.path.basename(client_file)
+                                #self._fstat_dict[newkey]["path"] = {}
+                                #self._fstat_dict[newkey]["path"]["local_path"] = client_file
 
 
-                            action = fstat.get('action', None) or fstat.get('headAction', None)
-                            if action:
-                                sg_status = self._get_p4_status(action)
-                                if sg_status:
-                                    self._fstat_dict[newkey]['sg_status_list'] = sg_status
-                            # get the user and description for submitted changelists
-                            change = fstat.get('headChange', None)
-                            if change and change in self._submitted_changes:
-                                self._fstat_dict[newkey]['p4_user'] = self._submitted_changes[change]['user']
-                                self._fstat_dict[newkey]['description'] = self._submitted_changes[change]['desc']
-                        # logger.debug(">>>>>>>>>> self._fstat_dict[newkey] is: {}".format(self._fstat_dict[newkey]))
+                                action = fstat.get('action', None) or fstat.get('headAction', None)
+                                if action:
+                                    sg_status = self._get_p4_status(action)
+                                    if sg_status:
+                                        self._fstat_dict[newkey]['sg_status_list'] = sg_status
+                                # get the user and description for submitted changelists
+                                change = fstat.get('headChange', None)
+                                if change and change in self._submitted_changes:
+                                    self._fstat_dict[newkey]['p4_user'] = self._submitted_changes[change]['user']
+                                    self._fstat_dict[newkey]['description'] = self._submitted_changes[change]['desc']
+                            # logger.debug(">>>>>>>>>> self._fstat_dict[newkey] is: {}".format(self._fstat_dict[newkey]))
 
 
     def _get_file_log(self, file_path, head_rev):
@@ -10649,140 +10909,56 @@ class ShotGridLogHandler(logging.Handler):
             return '#FF8C00'  # Dark Orange
         return '#A9A9A9'  # Default: Dark Grey
 
-"""
-import sgtk
-import logging
-from sgtk.platform.qt import QtCore, QtGui
+class LogUpdater(QtCore.QObject):
+    updateLog = QtCore.Signal(str, int)
 
-# Assuming QTimer, QCoreApplication are imported elsewhere or available globally
-# from sgtk.platform.qt import QtCore
-# from sgtk.platform.qt import QtGui
-# QTimer = QtCore.QTimer
-# QCoreApplication = QtCore.QCoreApplication
+    def __init__(self, parent=None):
+        super(LogUpdater, self).__init__(parent)
+        self.updateLog.connect(self._add_log_slot)
 
-class ShotGridLogHandler2(logging.Handler):
-    def __init__(self, log_window):
-        super().__init__()
-        self.log_window = log_window
-        self.log_queue = []
-        self.timer = QtCore.QTimer() # Use QtCore explicitly if not globally imported
-        self.timer.timeout.connect(self.flush)
-        self.timer.start(100)  # Update log window every 100ms
-        self._log_manager = sgtk.LogManager() # Get an instance of the LogManager
+    def _add_log_slot(self, msg, flag):
+        if flag <= 2:
+            msg = "\n{}\n".format(msg)
+        else:
+            msg = "{}".format(msg)
+        self.parent().ui.log_window.append(msg)
+        # if flag < 4:
+        #     logger.debug(msg)
+        self.parent().ui.log_window.verticalScrollBar().setValue(
+            self.parent().ui.log_window.verticalScrollBar().maximum()
+        )
 
-    def is_debug_logging_disabled(self):
-        #Checks if ShotGrid debug logging is disabled.
-        # Access the class property 'debug_logging_enabled' directly from sgtk.LogManager
-        # It's a property, not a method, so no parentheses are needed.
-        # return not self._log_manager.is_debug_logging_enabled() # Incorrect line from traceback
-        return not sgtk.LogManager.debug_logging_enabled
+class ProgressUpdater(QtCore.QObject):
+    """
+    A Qt object to handle thread-safe progress bar updates via signals.
+    """
+    update_progress = QtCore.Signal(float)
 
-    def emit(self, record):
-        # Check if the record level is DEBUG and if debug logging is disabled
-        if record.levelno == logging.DEBUG and self.is_debug_logging_disabled():
-            return  # Skip debug logs if debug logging is disabled
+    def __init__(self, progress_widget, dialog):
+        """
+        Initialize the ProgressUpdater with a progress widget and dialog.
 
-        try:
-            msg = self.format(record)
-            color = self.get_color(record.levelno)
-            # Ensure msg is properly escaped for HTML if necessary, though format usually handles it.
-            # For simplicity, assuming format handles basic escaping.
-            formatted_msg = f'<span style="color: {color};">{msg}</span><br>'
-            self.log_queue.append(formatted_msg)
-        except Exception:
-            # Handle potential formatting errors gracefully
-            self.handleError(record)
+        Args:
+            progress_widget (QProgressBar): The progress bar widget to update.
+            dialog (QDialog): The parent dialog containing the UI.
+        """
+        super(ProgressUpdater, self).__init__()
+        self._progress_widget = progress_widget
+        self._dialog = dialog
+        self.update_progress.connect(self._update_progress_slot)
 
+    def _update_progress_slot(self, value):
+        """
+        Slot to update the progress bar with the given value.
 
-    def flush(self):
-        # This method seems fine, but ensure thread safety if accessed from multiple threads.
-        # For typical Qt GUI usage where logging happens from the main thread, it's likely okay.
-        if self.log_queue:
-            try:
-                # Join the queued messages and append them
-                messages_to_append = ''.join(self.log_queue)
-                self.log_window.append(messages_to_append)
-                self.log_queue = [] # Clear the queue
-
-                # Scroll to the bottom
-                scrollbar = self.log_window.verticalScrollBar()
-                scrollbar.setValue(scrollbar.maximum())
-
-                # Process events to update the UI
-                QtCore.QCoreApplication.processEvents()
-            except Exception as e:
-                # Basic error handling for flushing issues
-                print(f"Error flushing log handler: {e}")
-
-
-    def get_color(self, levelno):
-        # This method seems fine
-        if levelno >= logging.CRITICAL: # Use >= for CRITICAL and above
-            return '#FF8C00'  # Dark Orange
-        elif levelno >= logging.ERROR: # Use >= for ERROR and CRITICAL
-            return '#d45239'  # Red
-        elif levelno >= logging.WARNING: # Use >= for WARNING, ERROR, CRITICAL
-            return '#FFD700'  # Dark Yellow
-        elif levelno >= logging.INFO: # Use >= for INFO and above
-            return '#D3D3D3'  # Light Grey
-        elif levelno >= logging.DEBUG: # Use >= for DEBUG and above
-             return '#A9A9A9'  # Dark Grey
-        # Default or NOTSET level
-        return '#A9A9A9' # Dark Grey (or choose another default)
-
-
-import logging
-from PySide2.QtCore import QTimer, QCoreApplication
-from tank_vendor.shotgun_api3 import Shotgun
-
-class ShotGridLogHandler(logging.Handler):
-    def __init__(self, log_window):
-        super().__init__()
-        self.log_window = log_window
-        self.log_queue = []
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.flush)
-        self.timer.start(100)  # Update log window every 100ms
-
-    def is_debug_logging_disabled(self):
-        # Check if ShotGrid debug logging is disabled
-        try:
-            # Access ShotGrid's configuration via the API or environment
-            # Assuming we're using the ShotGrid Python API
-            sg = Shotgun()  # Initialize with appropriate credentials
-            debug_logging = sg.get_debug_logging_status()  # Hypothetical method
-            return not debug_logging
-        except Exception:
-            # Fallback to environment variable or config file check
-            import os
-            return os.getenv("SHOTGUN_DEBUG_LOGGING", "0") == "0"
-
-    def emit(self, record):
-        # Skip debug logs if debug logging is disabled
-        if record.levelno == logging.DEBUG and self.is_debug_logging_disabled():
+        Args:
+            value (float): Progress value between 0 and 100.
+        """
+        if not self._dialog or not self._progress_widget or not self._dialog.isVisible():
+            logger.debug("Skipping progress update: dialog or progress widget is invalid or not visible")
             return
-        msg = self.format(record)
-        color = self.get_color(record.levelno)
-        formatted_msg = f'<span style="color: {color};">{msg}</span><br>'
-        self.log_queue.append(formatted_msg)
-
-    def flush(self):
-        if self.log_queue:
-            self.log_window.append(''.join(self.log_queue))
-            self.log_queue = []
-            self.log_window.verticalScrollBar().setValue(self.log_window.verticalScrollBar().maximum())
-            QCoreApplication.processEvents()
-
-    def get_color(self, levelno):
-        if levelno == logging.DEBUG:
-            return '#A9A9A9'  # Dark Grey
-        elif levelno == logging.INFO:
-            return '#D3D3D3'  # Light Grey
-        elif levelno == logging.WARNING:
-            return '#FFD700'  # Dark Yellow
-        elif levelno == logging.ERROR:
-            return '#d45239'  # Red
-        elif levelno == logging.CRITICAL:
-            return '#FF8C00'  # Dark Orange
-        return '#A9A9A9'  # Dark Grey
-"""
+        if 100 > value > 0:
+            self._progress_widget.setValue(int(value))
+            self._progress_widget.setVisible(True)
+        else:
+            self._progress_widget.setVisible(False)

@@ -143,6 +143,9 @@ class SgPublishThumbDelegate(PublishDelegate):
 
         # this is a publish!
         sg_data = shotgun_model.get_sg_data(model_index)
+        if not sg_data:
+            logger.debug("sg_data is None")
+            return
         # logger.debug(">>>>>>_format_publish:  sg_data: %s" % sg_data)
         current_file_type = "Publish"
         try:
