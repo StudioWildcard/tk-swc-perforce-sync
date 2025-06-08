@@ -10481,7 +10481,7 @@ class AppDialog(QWidget):
 
                     if not isinstance(fstat_list, list):
                         # logger.error(f"Failed to retrieve fstat for {key} after {max_retries} attempts")
-                        self._add_log(f"\n <span style='color:#CC3333'>Error: Failed to retrieve file status for {key} after {max_retries} retries.</span> \n",2)
+                        self._add_log(f"\n Failed to retrieve file status for {key} after {max_retries} retries. \n",2)
                         fstat_list = []
                 except Exception as e:
                     fstat_list = []
