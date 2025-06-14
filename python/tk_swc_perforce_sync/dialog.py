@@ -314,6 +314,13 @@ class AppDialog(QWidget):
         self.ui.file_history_view.addAction(self._refresh_file_history_action)
         self.ui.file_history_view.setContextMenuPolicy(Qt.ActionsContextMenu)
 
+        # Set sync of file history
+        self._sync_file_history_action = QAction("Sync", self.ui.file_history_view)
+        self._sync_file_history_action.triggered.connect(self._on_sync_file_history)
+        self.ui.file_history_view.addAction(self._sync_file_history_action)
+        self.ui.file_history_view.setContextMenuPolicy(Qt.ActionsContextMenu)
+        ###########################################
+
         # if an item in the list is double clicked the default action is run
         self.ui.file_history_view.doubleClicked.connect(self._on_file_history_double_clicked)
         ###########################################
@@ -2452,6 +2459,138 @@ class AppDialog(QWidget):
         self._sync_active = True
         sync_thread = threading.Thread(target=sync_thread_fn)
         sync_thread.start()
+
+
+
+    def _on_sync_file_history(self):
+        """
+        Syncs the specific version of the file currently selected in the
+        file history view.
+        """
+        logger.debug("Attempting to sync selected file from history...")
+
+        # Get the selected item from the file history view
+        selection_model = self.ui.file_history_view.selectionModel()
+        if not selection_model.hasSelection():
+            logger.info("No item selected in file history to sync.")
+            self._add_log("\n <span style='color:#FFD700'>No file version selected in the history panel.</span> \n",
+                          2)
+            return
+
+        # Assuming single selection for simplicity, take the first selected index
+        selected_indexes = selection_model.selectedIndexes()
+        if not selected_indexes:
+            return  # Should be redundant given hasSelection(), but good practice
+
+        proxy_index = selected_indexes[0]
+        # Ensure you are using the correct proxy model for the file history view
+        source_index = self._publish_file_history_proxy.mapToSource(proxy_index)
+        item = self._publish_file_history_model.itemFromIndex(source_index)
+
+        if not item:
+            logger.error("Could not retrieve item from file history selection.")
+            self._add_log(
+                "\n <span style='color:#CC3333'>Error: Could not retrieve selected history item.</span> \n", 2)
+            return
+
+        sg_data = item.get_sg_data()  # This should be the PublishedFile data for that specific version
+        if not sg_data:
+            logger.error("No ShotGrid data associated with the selected file history item.")
+            self._add_log(
+                "\n <span style='color:#CC3333'>Error: No data found for selected history item.</span> \n", 2)
+            return
+
+        file_name_display = sg_data.get("name", sg_data.get("code", "Unknown file"))
+        version_number = sg_data.get("version_number")
+        depot_path = sg_data.get("sg_p4_depo_path")
+
+        if not depot_path:
+            # Try to derive from local_path if sg_p4_depo_path is missing
+            local_path = sg_data.get("path", {}).get("local_path")
+            if local_path:
+                depot_path = self._convert_local_to_depot(local_path)  # Ensure this helper exists
+                if not depot_path:  # If conversion failed
+                    logger.error(
+                        f"Cannot sync '{file_name_display}': Failed to convert local path '{local_path}' to depot path.")
+                    self._add_log(
+                        f"\n <span style='color:#CC3333'>Error: Could not determine Perforce path for '{file_name_display}'.</span> \n",
+                        2)
+                    return
+            else:
+                logger.error(
+                    f"Cannot sync '{file_name_display}': Missing Perforce depot path and local path information.")
+                self._add_log(
+                    f"\n <span style='color:#CC3333'>Error: Path information missing for '{file_name_display}'.</span> \n",
+                    2)
+                return
+
+        if version_number is None:  # version_number could be 0, so check for None
+            logger.error(f"Cannot sync '{file_name_display}': Version number is missing from history item.")
+            self._add_log(
+                f"\n <span style='color:#CC3333'>Error: Version number missing for '{file_name_display}'.</span> \n",
+                2)
+            return
+
+        # Construct the Perforce path with revision specifier (e.g., //depot/file.ma#5)
+        depot_path_with_revision = f"{depot_path}#{version_number}"
+
+        logger.info(f"Preparing to sync specific version: {depot_path_with_revision}")
+        self._add_log(
+            f"\n <span style='color:#2C93E2'>Syncing: {os.path.basename(depot_path)} (Version {version_number})</span> \n",
+            2)
+        self._add_log(f"  Depot path: {depot_path_with_revision}", 3)
+
+        try:
+            if not self._p4 or not self._p4.connected():
+                logger.warning("Perforce not connected. Attempting to connect...")
+                self._connect_P4()
+                if not self._p4 or not self._p4.connected():
+                    logger.error("Failed to connect to Perforce. Sync aborted.")
+                    self._add_log("\n <span style='color:#CC3333'>Error: Failed to connect to Perforce.</span> \n",
+                                  2)
+                    return
+
+            # Perform the sync for the specific file and version
+            sync_result = self._p4.run_sync(depot_path_with_revision)
+
+            if sync_result is False or sync_result is None:
+                logger.error(f"Perforce sync command failed for {depot_path_with_revision}. Result: {sync_result}")
+                self._add_log(
+                    f"\n <span style='color:#CC3333'>Error syncing {file_name_display} v{version_number}. Check Perforce logs.</span> \n",
+                    2)
+            elif isinstance(sync_result, list):
+                if not sync_result:
+                    logger.info(f"File {depot_path_with_revision} is already up to date.")
+                    self._add_log(
+                        f"\n <span style='color:#2C93E2'>{file_name_display} v{version_number} is already up to date.</span> \n",
+                        2)
+                else:
+                    synced_file_info = "Synced: "
+                    for entry in sync_result:
+                        if isinstance(entry, dict):
+                            action = entry.get("action", "updated")
+                            client_file = entry.get("clientFile", depot_path)  # Fallback to depot_path for display
+                            synced_file_info += f"{os.path.basename(client_file)} ({action}), "
+                    synced_file_info = synced_file_info.rstrip(", ")
+                    logger.info(f"Successfully synced {depot_path_with_revision}.")
+                    self._add_log(
+                        f"\n <span style='color:#2C93E2'>Successfully {synced_file_info} (Version {version_number}).</span> \n",
+                        2)
+
+                # Refresh relevant data after a successful or "already up-to-date" sync
+                # Use QTimer.singleShot to ensure it runs after current event processing
+                QtCore.QTimer.singleShot(0, self._after_syncing_operations)
+            else:
+                logger.warning(f"Unexpected result from p4.run_sync for {depot_path_with_revision}: {sync_result}")
+                self._add_log(
+                    f"\n <span style='color:#FFD700'>Sync status unclear for {file_name_display} v{version_number}.</span> \n",
+                    2)
+
+        except Exception as e:
+            logger.error(f"Exception during sync of {depot_path_with_revision}: {e}", exc_info=True)
+            self._add_log(
+                f"\n <span style='color:#CC3333'>Exception syncing {file_name_display} v{version_number}: {e}</span> \n",
+                2)
 
     def _get_selected_entity_path_info(self):
         """
