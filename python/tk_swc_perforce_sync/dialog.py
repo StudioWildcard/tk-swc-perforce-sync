@@ -9240,7 +9240,7 @@ class AppDialog(QWidget):
             QtCore.QTimer.singleShot(0, self._populate_submitted_widget)
             # self._populate_submitted_widget() # Original direct call
 
-    def _on_treeview_item_selected(self):
+    def _on_treeview_item_selected_3(self):
 
         """
         Slot triggered when someone changes the selection in a treeview.
@@ -9276,6 +9276,7 @@ class AppDialog(QWidget):
         # field_value can be the entity dict for 'My Tasks' (Task entity)
         # Let's prioritize field_value if it's an entity dict, else use sg_data
         sg_data_from_tree, field_value_from_tree = model_item_data.get_item_data(selected_item)
+        logger.debug(f"Extracted data from selected tree item: sg_data={sg_data_from_tree}, field_value={field_value_from_tree}")
 
         # Determine the primary entity data associated with the click
         # This handles both Asset/Shot clicks and Task clicks correctly
@@ -9360,6 +9361,103 @@ class AppDialog(QWidget):
         self._setup_file_details_panel([])  # Clear details initially
 
     logger.debug("Finished _on_treeview_item_selected.")
+
+    def _on_treeview_item_selected(self):
+        """
+        Slot triggered when someone changes the selection in a treeview.
+        Handles both specific entity selections (Assets, Shots, Tasks) and
+        intermediate grouping nodes (Asset Types, Statuses, etc.).
+        """
+        logger.debug("Treeview item selection changed.")
+        self._fstat_dict = {}  # Reset Perforce status
+
+        # 1. Get the selected item from the tree view
+        selected_item = self._get_selected_entity()
+
+        # --- Handle case where nothing is selected (e.g., clearing selection) ---
+        if not selected_item:
+            logger.debug("No item selected in the tree view. Clearing UI.")
+            self._publish_model.clear()
+            self._sg_data = []
+            self._fstat_dict = {}
+            self._entity_path = None
+            self._entity_data = None
+            self._setup_file_details_panel([])
+            QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(None))
+            if self.main_view_mode == self.MAIN_VIEW_COLUMN:
+                self.column_view_model.setRowCount(0)
+            if self.main_view_mode == self.MAIN_VIEW_SUBMITTED:
+                self._reset_submitted_widget()
+            return
+
+        # 2. Extract data from the selected tree item
+        sg_data_from_tree, field_value_from_tree = model_item_data.get_item_data(selected_item)
+        logger.debug(f"Extracted data from selected tree item: sg_data={sg_data_from_tree}, field_value={field_value_from_tree}")
+
+        # 3. Determine if the selection is a specific entity or an intermediate node
+        is_specific_entity = False
+        entity_data_clicked = None
+        if isinstance(field_value_from_tree, dict) and field_value_from_tree.get("type") and field_value_from_tree.get("id"):
+            entity_data_clicked = field_value_from_tree  # e.g., Task data from 'My Tasks'
+            is_specific_entity = True
+        elif isinstance(sg_data_from_tree, dict) and sg_data_from_tree.get("type") and sg_data_from_tree.get("id"):
+            entity_data_clicked = sg_data_from_tree  # e.g., Asset data from 'Assets'
+            is_specific_entity = True
+
+        # 4. Perform UI updates common to both selection types
+        self._entity_data = entity_data_clicked  # Store the resolved entity data (or None)
+        self._populate_entity_breadcrumbs(selected_item)
+        self._add_file_history_record(self._current_entity_preset, selected_item)
+        self._setup_file_details_panel([])  # Clear details panel initially
+
+        # This is key: always ask the publish model to load data for the selected item.
+        # This method is designed to handle both leaf nodes and intermediate folders.
+        self._load_publishes_for_entity_item(selected_item)
+
+        # 5. Perform specific actions based on the selection type
+        if is_specific_entity:
+            # --- A specific entity (Asset, Shot, Task) was selected ---
+            logger.debug(f"Processing as specific entity: {self._entity_data}")
+
+            # Get filesystem path and fetch Perforce data
+            self._entity_path, _, _ = self._get_entity_info(self._entity_data)
+            logger.debug(f"Entity path determined as: {self._entity_path}")
+            self.get_current_sg_data()
+            self._update_perforce_data()
+
+            # Resolve the entity for panel navigation (handles Tasks correctly)
+            target_entity_for_panel = None
+            if self._entity_data.get("type") == "Task":
+                linked_entity = self._entity_data.get("entity")
+                if linked_entity and isinstance(linked_entity, dict):
+                    target_entity_for_panel = linked_entity
+            else:
+                target_entity_for_panel = self._entity_data
+
+            # Update the ShotGrid panel
+            logger.debug(f"Scheduling panel update for: {target_entity_for_panel}")
+            QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(target_entity_for_panel))
+
+        else:
+            # --- An intermediate grouping node was selected ---
+            logger.debug(f"Processing as intermediate node: {field_value_from_tree}")
+            # We have already loaded its children's publishes.
+            # Now, clear state related to a single entity context.
+            self._entity_path = None
+            self._sg_data = []
+            self._fstat_dict = {}
+            QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(None)) # Clear the panel
+
+        # 6. Refresh views that depend on the newly populated data
+        if self.main_view_mode == self.MAIN_VIEW_COLUMN:
+            logger.debug("Scheduling Column View update.")
+            QtCore.QTimer.singleShot(0, self._set_column_view_mode)
+        if self.main_view_mode == self.MAIN_VIEW_SUBMITTED:
+            logger.debug("Scheduling Submitted View update.")
+            QtCore.QTimer.singleShot(0, self._populate_submitted_widget)
+
+        logger.debug("Finished _on_treeview_item_selected.")
+
     def get_current_sg_data(self):
         """
         Populates self._sg_data with ShotGrid publish data from the source model,
