@@ -4144,75 +4144,97 @@ class AppDialog(QWidget):
                 self._insert_perforce_row(row, item_data, sg_item)
                 row += 1
 
+    def _apply_grouping_and_update_view(self, grouping_mode, group_dict, group_column_name):
+        """
+        Applies grouping to the column view, populates data, and adjusts column visibility
+        and headers to reflect the grouping.
+
+        :param grouping_mode: The COLUMN_VIEW enum for the new grouping.
+        :param group_dict: The dictionary containing the grouped data.
+        :param group_column_name: The string name of the column being grouped by.
+        """
+        # Set internal state for grouping
+        self._set_groups = True
+        self._current_column_view_grouping = grouping_mode
+
+        # Populate the view with grouped data. Note: this method also calls
+        # _setup_column_view(), which resets all headers and column visibility.
+        self._create_groups(group_dict)
+
+        # Now, modify the view based on the grouping
+        try:
+            # Find the index of the column that we are grouping by
+            column_to_hide_index = self._headers.index(group_column_name)
+            # Hide that column, as its data is now shown in the group headers
+            self.ui.column_view.setColumnHidden(column_to_hide_index, True)
+            logger.debug(f"Hiding column '{group_column_name}' at index {column_to_hide_index}.")
+        except ValueError:
+            # This should not happen if the group_column_name is correct
+            logger.warning(f"Could not find column '{group_column_name}' in headers to hide.")
+
+        # Update the header of the first column (which is now the grouping column)
+        # to show what the data is grouped by.
+        grouping_header_item = QStandardItem(group_column_name)
+        self.column_view_model.setHorizontalHeaderItem(0, grouping_header_item)
+        logger.debug(f"Setting header of column 0 to '{group_column_name}'.")
+
     def _no_groups(self):
-        # Clear all rows from the model
-        #self.column_view_model.clear()
-        # Set up the column view
+        # This method resets the view to its default, ungrouped state.
+        # _setup_column_view will make all columns visible and reset headers correctly.
         self._setup_column_view()
         self._current_column_view_grouping = self.COLUMN_VIEW_UNGROUP
-        # Add items to the model
+        # Add non-grouped items to the model
         self._populate_column_view_no_groups()
 
     def _group_by_folder(self):
-        # self._group_by_folder_action.setCheckable(True)
-        #self._setup_column_view()
-        self._set_groups = True
-        self._current_column_view_grouping = self.COLUMN_VIEW_GROUP_BY_FOLDER
-        self._create_groups(self._folder_dict)
+        self._apply_grouping_and_update_view(
+            self.COLUMN_VIEW_GROUP_BY_FOLDER, self._folder_dict, "Folder"
+        )
 
     def _group_by_action(self):
-        #self._setup_column_view()
-        self._set_groups = True
-        self._current_column_view_grouping = self.COLUMN_VIEW_GROUP_BY_ACTION
-        self._create_groups(self._action_dict)
+        self._apply_grouping_and_update_view(
+            self.COLUMN_VIEW_GROUP_BY_ACTION, self._action_dict, "Action"
+        )
 
     def _group_by_revision(self):
-        #self._setup_column_view()
-        self._set_groups = True
-        self._current_column_view_grouping = self.COLUMN_VIEW_GROUP_BY_REVISION
-        self._create_groups(self._revision_dict)
+        self._apply_grouping_and_update_view(
+            self.COLUMN_VIEW_GROUP_BY_REVISION, self._revision_dict, "Revision#"
+        )
 
     def _group_by_file_extension(self):
-        #self._setup_column_view()
-        self._set_groups = True
-        self._current_column_view_grouping = self.COLUMN_VIEW_GROUP_BY_EXTENSION
-        self._create_groups(self._file_extension_dict)
+        self._apply_grouping_and_update_view(
+            self.COLUMN_VIEW_GROUP_BY_EXTENSION, self._file_extension_dict, "Extension"
+        )
 
     def _group_by_type(self):
-        #self._setup_column_view()
-        self._set_groups = True
-        self._current_column_view_grouping = self.COLUMN_VIEW_GROUP_BY_TYPE
-        self._create_groups(self._type_dict)
+        self._apply_grouping_and_update_view(
+            self.COLUMN_VIEW_GROUP_BY_TYPE, self._type_dict, "Type"
+        )
 
     def _group_by_user(self):
-        #self._setup_column_view()
-        self._set_groups = True
-        self._current_column_view_grouping = self.COLUMN_VIEW_GROUP_BY_USER
-        self._create_groups(self._user_dict)
+        self._apply_grouping_and_update_view(
+            self.COLUMN_VIEW_GROUP_BY_USER, self._user_dict, "User"
+        )
 
     def _group_by_task_name(self):
-        #self._setup_column_view()
-        self._set_groups = True
-        self._current_column_view_grouping = self.COLUMN_VIEW_GROUP_BY_TASK
-        self._create_groups(self._task_name_dict)
+        self._apply_grouping_and_update_view(
+            self.COLUMN_VIEW_GROUP_BY_TASK, self._task_name_dict, "Task"
+        )
 
     def _group_by_task_status(self):
-        #self._setup_column_view()
-        self._set_groups = True
-        self._current_column_view_grouping = self.COLUMN_VIEW_GROUP_BY_STATUS
-        self._create_groups(self._task_status_dict)
+        self._apply_grouping_and_update_view(
+            self.COLUMN_VIEW_GROUP_BY_STATUS, self._task_status_dict, "Status"
+        )
 
     def _group_by_step(self):
-        #self._setup_column_view()
-        self._set_groups = True
-        self._current_column_view_grouping = self.COLUMN_VIEW_GROUP_BY_STEP
-        self._create_groups(self._step_dict)
+        self._apply_grouping_and_update_view(
+            self.COLUMN_VIEW_GROUP_BY_STEP, self._step_dict, "Step"
+        )
 
     def _group_by_date_modified(self):
-        #self._setup_column_view()
-        self._set_groups = True
-        self._current_column_view_grouping = self.COLUMN_VIEW_GROUP_BY_DATE_MODIFIED
-        self._create_groups(self._date_modified_dict)
+        self._apply_grouping_and_update_view(
+            self.COLUMN_VIEW_GROUP_BY_DATE_MODIFIED, self._date_modified_dict, "Date Modified"
+        )
 
     def _create_column_view_context_menu(self):
         self._column_add_action = QAction("Add", self.ui.column_view)
