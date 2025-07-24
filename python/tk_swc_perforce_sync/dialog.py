@@ -704,6 +704,12 @@ class AppDialog(QWidget):
         logger.debug(
             f"Scheduled a delayed call to refresh_entity_preset_tabs in {initial_refresh_delay_ms / 1000} seconds."
         )
+        #################################################
+        # Add sync count cache
+        self._sync_count_cache = {}
+        self._sync_count_cache_timeout = 60  # seconds
+        self._sync_count_cache_lock = threading.Lock()  # Thread safety for cache
+        #################################################
 
     def _set_logger(self):
         sg_log_handler = ShotGridLogHandler(self.ui.log_window)
@@ -2133,7 +2139,7 @@ class AppDialog(QWidget):
                     if sync_count == 0:
                         msg = "Up to date"
                     else:
-                        msg = "{} To Sync".format(sync_count)
+                        msg = "{} files".format(sync_count)
 
                     # Get or create the item for the second column
                     desc_item = source_model.item(source_index.row(), 1)
@@ -2805,7 +2811,7 @@ class AppDialog(QWidget):
                     if sync_count == 0:
                         msg = "Up to date"
                     else:
-                        msg = "{} To Sync".format(sync_count)
+                        msg = "{} files".format(sync_count)
 
                     # Get or create the item for the second column
                     desc_item = source_model.item(source_index.row(), 1)
@@ -8081,7 +8087,7 @@ class AppDialog(QWidget):
 
                     if entity_path:
                         sync_count = self._get_sync_count_for_entity(entity_path)
-                        sync_msg = "Up to date" if sync_count == 0 else f"{sync_count} To Sync"
+                        sync_msg = "Up to date" if sync_count == 0 else f"{sync_count} files"
                         sync_icon = self.sync_icons.get_sync_pixmap(sync_count)
 
                         # Get or create the item for the second column
@@ -8266,7 +8272,7 @@ class AppDialog(QWidget):
              self._on_home_clicked()
         # ----------------
 
-    def _load_entity_presets(self):
+    def _load_entity_presets_original(self):
         """
         Loads the entity presets from the configuration and sets up buttons and models
         based on the config.
@@ -8643,13 +8649,245 @@ class AppDialog(QWidget):
         # data has properly arrived in the model.
         self._on_home_clicked()
 
-    def _get_sync_count_for_entity(self, key):
+    def _load_entity_presets(self):
+        """
+        Loads entity presets from the configuration and sets up the UI for each tab.
+
+        This version standardizes all tabs to include a "Name" and "To Sync" column,
+        preparing them for asynchronous data loading.
+        """
+        app = sgtk.platform.current_bundle()
+
+        # Disconnect the tab change signal while rebuilding to prevent errors
+        try:
+            self.ui.entity_preset_tabs.currentChanged.disconnect(
+                self._on_entity_profile_tab_clicked
+            )
+        except (TypeError, RuntimeError):
+            # Signal was not connected yet, which is fine on first run.
+            pass
+
+        # Clear existing presets and UI elements before rebuilding
+        self._entity_presets = {}
+        self.ui.entity_preset_tabs.clear()
+        self._dynamic_widgets = []
+
+        for setting_dict in app.get_setting("entities"):
+            # --- Validate settings ---
+            key_error_msg = (
+                "Configuration error: 'entities' item %s is missing key '%s'!"
+            )
+            value_error_msg = "Configuration error: 'entities' item %s key '%s' has an invalid value '%s'!"
+
+            key = "caption"
+            if key not in setting_dict:
+                raise TankError(key_error_msg % (setting_dict, key))
+            preset_name = setting_dict["caption"]
+
+            key = "type"
+            value = setting_dict.get(key, "Query")  # Default to Query
+            if value not in ("Hierarchy", "Query"):
+                raise TankError(value_error_msg % (setting_dict, key, value))
+            type_hierarchy = value == "Hierarchy"
+
+            sg_entity_type = None
+            if type_hierarchy:
+                key = "root"
+                if key not in setting_dict:
+                    raise TankError(key_error_msg % (setting_dict, key))
+                sg_entity_type = "Project"
+            else:  # Query type
+                for key in ("entity_type", "hierarchy", "filters"):
+                    if key not in setting_dict:
+                        raise TankError(key_error_msg % (setting_dict, key))
+                sg_entity_type = setting_dict["entity_type"]
+
+            publish_filters = setting_dict.get("publish_filters", [])
+            # --- End Validation ---
+
+            # --- Create models ---
+            if type_hierarchy:
+                entity_root = self._get_entity_root(setting_dict["root"])
+                (model, proxy_model) = self._setup_hierarchy_model(app, entity_root)
+            else:
+                (model, proxy_model) = self._setup_query_model(app, setting_dict)
+            # ---------------------
+
+            # --- Create UI elements ---
+            logger.debug(f"[PRESET] Creating tab for preset: {preset_name}")
+            tab = QWidget()
+            layout = QVBoxLayout(tab)
+            layout.setSpacing(0)
+            layout.setContentsMargins(0, 0, 0, 0)
+            self.ui.entity_preset_tabs.addTab(tab, preset_name)
+
+            view = QTreeView(tab)
+            layout.addWidget(view)
+            view.setModel(proxy_model)
+            # ------------------------
+
+            # --- Setup View (Applied to ALL tabs for consistency) ---
+            view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            view.setProperty("showDropIndicator", False)
+            view.setIconSize(QSize(20, 20))
+            view.setStyleSheet("QTreeView::item { padding: 6px; }")
+            view.setUniformRowHeights(True)
+
+            # --- Standardize the two-column layout for all tabs ---
+            view.setHeaderHidden(False)
+            view.header().setStretchLastSection(False)
+            view.header().setSectionResizeMode(0, QHeaderView.Stretch)
+            view.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+            view.setSortingEnabled(True)
+            view.sortByColumn(0, Qt.AscendingOrder)
+
+            source_model = proxy_model.sourceModel()
+            # Ensure model has 2 columns for "Name" and "To Sync"
+            if source_model.columnCount() < 2:
+                source_model.setColumnCount(2)
+            source_model.setHorizontalHeaderLabels(["Name", "To Sync"])
+            # --- End of standardized setup ---
+
+            # --- Search Widgets (logic remains the same) ---
+            if not type_hierarchy:
+                search_layout = QHBoxLayout()
+                layout.addLayout(search_layout)
+
+                search_edit = MyLineEdit(tab)
+                search_edit.setStyleSheet(
+                    "QLineEdit{ border-width: 1px; "
+                    "background-image: url(:/res/search.png); "
+                    "background-repeat: no-repeat; "
+                    "background-position: center left; "
+                    "border-radius: 5px; "
+                    "padding-left:20px; "
+                    "margin:4px; "
+                    "height:22px; "
+                    "}"
+                )
+                search_edit.setToolTip(
+                    "Use the <i>search</i> field to narrow down the items displayed in the tree above."
+                )
+                search_edit.setPlaceholderText("Search...")
+                search_layout.addWidget(search_edit)
+
+                search_button = QPushButton("Search", tab)
+                search_button.setToolTip("Click to search for items displayed in the tree above.")
+                search_layout.addWidget(search_button)
+
+                clear_search_button = QToolButton(tab)
+                clear_icon = QIcon(":/res/clear_search.png")
+                clear_search_button.setIcon(clear_icon)
+                clear_search_button.setAutoRaise(True)
+                clear_search_button.setToolTip("Click to clear your current search.")
+                clear_search_button.clicked.connect(lambda checked=False, editor=search_edit: editor.setText(""))
+                search_layout.addWidget(clear_search_button)
+
+                search_edit.returnPressed.connect(
+                    lambda v=view, pm=proxy_model, search=search_edit: self.trigger_search(v, pm, search)
+                )
+                search_button.clicked.connect(
+                    lambda v=view, pm=proxy_model, search=search_edit: self.trigger_search(v, pm, search)
+                )
+                self._dynamic_widgets.extend([search_layout, search_edit, search_button, clear_search_button, clear_icon])
+            else:  # Hierarchy model
+                hierarchical_search = shotgun_search_widget.HierarchicalSearchWidget(tab)
+                hierarchical_search.search_root = entity_root
+                hierarchical_search.node_activated.connect(
+                    lambda entity_type, entity_id, name, path_label, incremental_paths, v=view, pm=proxy_model: self._node_activated(
+                        incremental_paths, v, pm
+                    )
+                )
+                model.async_item_retrieval_completed.connect(
+                    lambda item, v=view, pm=proxy_model: self._async_item_retrieval_completed(
+                        item, v, pm
+                    )
+                )
+                hierarchical_search.set_bg_task_manager(self._task_manager)
+                layout.addWidget(hierarchical_search)
+                self._dynamic_widgets.append(hierarchical_search)
+            # -----------------------------------------------
+
+            # --- Context Menus (logic remains the same) ---
+            def action_hovered(action):
+                tip = action.toolTip()
+                if tip == action.text() or not tip:
+                    QToolTip.hideText()
+                else:
+                    QToolTip.showText(QCursor.pos(), tip)
+
+            view_actions = []
+            if type_hierarchy:
+                action_ca = QAction("Collapse All Folders", view)
+                action_ca.hovered.connect(lambda act=action_ca: action_hovered(act))
+                action_ca.triggered.connect(view.collapseAll)
+                view_actions.append(action_ca)
+
+                action_reset = QAction("Reset", view)
+                action_reset.setToolTip(
+                    "<nobr>Reset the tree to its root collapsed state.</nobr>"
+                )
+                action_reset.hovered.connect(lambda act=action_reset: action_hovered(act))
+                action_reset.triggered.connect(model.reload_data)
+                view_actions.append(action_reset)
+            else:
+                action_ea = QAction("Expand All Folders", view)
+                action_ea.hovered.connect(lambda act=action_ea: action_hovered(act))
+                action_ea.triggered.connect(view.expandAll)
+                view_actions.append(action_ea)
+
+                action_ca = QAction("Collapse All Folders", view)
+                action_ca.hovered.connect(lambda act=action_ca: action_hovered(act))
+                action_ca.triggered.connect(view.collapseAll)
+                view_actions.append(action_ca)
+
+                action_refresh = QAction("Refresh", view)
+                action_refresh.setToolTip(
+                    "<nobr>Refresh tree data from ShotGrid.</nobr>"
+                )
+                action_refresh.hovered.connect(lambda act=action_refresh: action_hovered(act))
+                action_refresh.triggered.connect(model.async_refresh)
+                view_actions.append(action_refresh)
+
+            view.setContextMenuPolicy(Qt.ActionsContextMenu)
+            for act in view_actions:
+                view.addAction(act)
+            self._dynamic_widgets.extend(view_actions)
+            # ---------------------------------------------
+
+            # --- Connect Signals & Overlay ---
+            selection_model = view.selectionModel()
+            selection_model.selectionChanged.connect(self._on_treeview_item_selected)
+            overlay = ShotgunModelOverlayWidget(model, view)
+            # ---------------------------------
+
+            # --- Store Preset ---
+            ep = EntityPreset(
+                preset_name, sg_entity_type, model, proxy_model, view, publish_filters
+            )
+            self._entity_presets[preset_name] = ep
+            # Keep references to avoid garbage collection
+            self._dynamic_widgets.extend([model, proxy_model, tab, layout, view, selection_model, overlay])
+            # --------------------
+
+        # --- Finalize ---
+        # Reconnect the main tab change signal now that all tabs are created
+        self.ui.entity_preset_tabs.currentChanged.connect(
+            self._on_entity_profile_tab_clicked
+        )
+
+        # After all presets are loaded, navigate to the default "home" view.
+        if self.ui.entity_preset_tabs.count() > 0:
+            QtCore.QTimer.singleShot(0, self._on_home_clicked)
+
+
+    def _get_sync_count_for_entity_original(self, key):
         """
         Given a ShotGrid entity, return how many files need to be synced for it.
         Includes debug logging for tracing issues.
         """
 
-        # logger.debug(f"[SYNC CHECK] Checking entity: PATH={key}")
+        logger.debug(f"[SYNC CHECK] Checking entity: PATH={key}")
 
         try:
             sync_count = 0
@@ -8658,16 +8896,67 @@ class AppDialog(QWidget):
             fstat_list = self._p4.run_fstat(key + '/...')
             for i, fstat in enumerate(fstat_list):
                 if fstat:
-                    # logger.debug(f"[SYNC CHECK] fstat {i}: {fstat}")
+                    logger.debug(f"[SYNC CHECK] fstat {i}: {fstat}")
                     have_rev = fstat.get('haveRev', "0")
                     head_rev = fstat.get('headRev', "0")
                     if self._to_sync(have_rev, head_rev):
                         sync_count += 1
+                        logger.debug(f"sync_count: {sync_count}")
 
             return sync_count
 
         except Exception as e:
             # logger.warning(f"[SYNC CHECK] Exception during sync check for entity path {key}: {e}")
+            return 0
+
+    def _get_sync_count_for_entity(self, key):
+        """
+        Given a ShotGrid entity path, return how many files need to be synced for it.
+        Checks both Perforce status and actual file existence on disk.
+        """
+        logger.debug(f"[SYNC CHECK] Checking entity: PATH={key}")
+
+        try:
+            sync_count = 0
+            key = key.rstrip('/')
+
+            # Get file status from Perforce
+            fstat_list = self._p4.run_fstat(key + '/...')
+
+            for i, fstat in enumerate(fstat_list):
+                if fstat:
+                    # logger.debug(f"[SYNC CHECK] fstat {i}: {fstat}")
+
+                    # Get the local file path
+                    client_file = fstat.get('clientFile')
+                    have_rev = fstat.get('haveRev', "0")
+                    head_rev = fstat.get('headRev', "0")
+
+                    # Check if file needs syncing
+                    needs_sync = False
+
+                    if have_rev == "0" or have_rev == "none":
+                        # File has never been synced
+                        needs_sync = True
+                    elif client_file:
+                        # Check if file actually exists on disk
+                        if not os.path.exists(client_file):
+                            # Perforce thinks we have it, but file doesn't exist
+                            needs_sync = True
+                            # logger.debug(f"[SYNC CHECK] File missing on disk: {client_file}")
+                        elif self._to_sync(have_rev, head_rev):
+                            # File exists but is out of date
+                            needs_sync = True
+                            #logger.debug(f"[SYNC CHECK] File out of date: {client_file} (have:{have_rev}, head:{head_rev})")
+
+                    if needs_sync:
+                        sync_count += 1
+
+            logger.debug(f"[SYNC CHECK] Total files to sync: {sync_count}")
+            return sync_count
+
+        except Exception as e:
+            logger.warning(f"[SYNC CHECK] Exception during sync check for entity path {key}: {e}")
             return 0
 
     def trigger_search(self, view, proxy_model, search):
@@ -9384,7 +9673,8 @@ class AppDialog(QWidget):
 
     logger.debug("Finished _on_treeview_item_selected.")
 
-    def _on_treeview_item_selected(self):
+
+    def _on_treeview_item_selected_original(self):
         """
         Slot triggered when someone changes the selection in a treeview.
         Handles both specific entity selections (Assets, Shots, Tasks) and
@@ -9479,6 +9769,355 @@ class AppDialog(QWidget):
             QtCore.QTimer.singleShot(0, self._populate_submitted_widget)
 
         logger.debug("Finished _on_treeview_item_selected.")
+
+    #---------------------------------------------------
+
+    def _on_treeview_item_selected(self):
+        """
+        Slot triggered when someone changes the selection in a treeview.
+        Handles both specific entity selections (Assets, Shots, Tasks) and
+        intermediate grouping nodes (Asset Types, Statuses, etc.).
+        Updates sync count for the selected entity on-demand with caching.
+        """
+        logger.debug("Treeview item selection changed.")
+        self._fstat_dict = {}  # Reset Perforce status
+
+        # 1. Get the selected item from the tree view
+        selected_item = self._get_selected_entity()
+
+        # --- Handle case where nothing is selected (e.g., clearing selection) ---
+        if not selected_item:
+            logger.debug("No item selected in the tree view. Clearing UI.")
+            self._clear_ui_on_no_selection()
+            return
+
+        # 2. Extract data from the selected tree item
+        sg_data_from_tree, field_value_from_tree = model_item_data.get_item_data(selected_item)
+        logger.debug(
+            f"Extracted data from selected tree item: sg_data={sg_data_from_tree}, field_value={field_value_from_tree}")
+
+        # 3. Determine if the selection is a specific entity or an intermediate node
+        is_specific_entity = False
+        entity_data_clicked = None
+
+        if isinstance(field_value_from_tree, dict) and field_value_from_tree.get("type") and field_value_from_tree.get(
+                "id"):
+            entity_data_clicked = field_value_from_tree  # e.g., Task data from 'My Tasks'
+            is_specific_entity = True
+        elif isinstance(sg_data_from_tree, dict) and sg_data_from_tree.get("type") and sg_data_from_tree.get("id"):
+            entity_data_clicked = sg_data_from_tree  # e.g., Asset data from 'Assets'
+            is_specific_entity = True
+
+        # 4. Store the resolved entity data
+        self._entity_data = entity_data_clicked  # Store the resolved entity data (or None)
+
+        # 5. Perform UI updates common to both selection types
+        self._populate_entity_breadcrumbs(selected_item)
+        self._add_file_history_record(self._current_entity_preset, selected_item)
+        self._setup_file_details_panel([])  # Clear details panel initially
+
+        # 6. Load publishes for the selected item (handles both entities and folders)
+        self._load_publishes_for_entity_item(selected_item)
+
+        # 7. Handle specific entity selection
+        if is_specific_entity:
+            logger.debug(f"Processing as specific entity: {self._entity_data}")
+
+            # Get filesystem path
+            self._entity_path, entity_id, entity_type = self._get_entity_info(self._entity_data)
+            logger.debug(f"Entity path determined as: {self._entity_path}")
+
+            # Update sync count display for this entity
+            if self._entity_path:
+                self._update_sync_count_for_selected_item(selected_item, self._entity_path, entity_id, entity_type)
+
+            # Get current SG data and Perforce data
+            self.get_current_sg_data()
+            self._update_perforce_data()
+
+            # Resolve entity for panel navigation (handles Tasks correctly)
+            target_entity_for_panel = self._resolve_entity_for_panel(self._entity_data)
+
+            # Schedule panel update
+            logger.debug(f"Scheduling panel update for: {target_entity_for_panel}")
+            QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(target_entity_for_panel))
+
+        else:
+            # --- An intermediate grouping node was selected ---
+            logger.debug(f"Processing as intermediate node: {field_value_from_tree}")
+            self._clear_entity_specific_data()
+
+            # Update sync count for intermediate nodes if applicable
+            self._update_sync_count_for_intermediate_node(selected_item)
+
+            # Clear the panel since no specific entity is selected
+            QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(None))
+
+        # 8. Refresh views that depend on the newly populated data
+        self._refresh_dependent_views()
+
+        logger.debug("Finished _on_treeview_item_selected.")
+
+    def _get_sync_count_for_entity_cached(self, entity_path):
+        """
+        Get sync count with caching to improve performance.
+        Thread-safe implementation with cache expiration.
+        """
+        current_time = time.time()
+        cache_key = entity_path.lower().rstrip('/')  # Normalize the path for consistent caching
+
+        with self._sync_count_cache_lock:
+            # Check if we have a cached value that's not expired
+            if cache_key in self._sync_count_cache:
+                cached_value, timestamp = self._sync_count_cache[cache_key]
+                if current_time - timestamp < self._sync_count_cache_timeout:
+                    logger.debug(f"Using cached sync count for {entity_path}: {cached_value}")
+                    return cached_value
+                else:
+                    # Remove expired entry
+                    del self._sync_count_cache[cache_key]
+
+        # Calculate fresh sync count (outside the lock to avoid blocking)
+        logger.debug(f"Calculating fresh sync count for {entity_path}")
+        sync_count = self._get_sync_count_for_entity(entity_path)
+
+        # Cache the result
+        with self._sync_count_cache_lock:
+            self._sync_count_cache[cache_key] = (sync_count, current_time)
+            # Limit cache size to prevent memory issues
+            self._cleanup_sync_cache()
+
+        return sync_count
+
+    def _cleanup_sync_cache(self):
+        """
+        Clean up old entries from sync cache to prevent memory bloat.
+        Should be called while holding the cache lock.
+        """
+        max_cache_size = 100  # Maximum number of entries to keep
+
+        if len(self._sync_count_cache) > max_cache_size:
+            # Sort by timestamp and keep only the most recent entries
+            sorted_items = sorted(self._sync_count_cache.items(),
+                                  key=lambda x: x[1][1], reverse=True)
+            self._sync_count_cache = dict(sorted_items[:max_cache_size])
+
+    def _invalidate_sync_cache(self, entity_path=None):
+        """
+        Invalidate sync cache entries.
+        If entity_path is provided, only that entry is invalidated.
+        Otherwise, the entire cache is cleared.
+        """
+        with self._sync_count_cache_lock:
+            if entity_path:
+                cache_key = entity_path.lower().rstrip('/')
+                if cache_key in self._sync_count_cache:
+                    del self._sync_count_cache[cache_key]
+                    logger.debug(f"Invalidated sync cache for {entity_path}")
+            else:
+                self._sync_count_cache.clear()
+                logger.debug("Cleared entire sync cache")
+
+    def _clear_ui_on_no_selection(self):
+        """Clear all UI elements when no item is selected."""
+        self._publish_model.clear()
+        self._sg_data = []
+        self._fstat_dict = {}
+        self._entity_path = None
+        self._entity_data = None
+        self._setup_file_details_panel([])
+        QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(None))
+
+        if self.main_view_mode == self.MAIN_VIEW_COLUMN:
+            self.column_view_model.setRowCount(0)
+        if self.main_view_mode == self.MAIN_VIEW_SUBMITTED:
+            self._reset_submitted_widget()
+
+    def _clear_entity_specific_data(self):
+        """Clear data specific to entity selection."""
+        self._entity_path = None
+        self._sg_data = []
+        self._fstat_dict = {}
+
+    def _resolve_entity_for_panel(self, entity_data):
+        """
+        Resolve the correct entity for panel navigation.
+        For Tasks, returns the linked entity (Asset/Shot).
+        For other entities, returns the entity itself.
+        """
+        if not entity_data:
+            return None
+
+        if entity_data.get("type") == "Task":
+            linked_entity = entity_data.get("entity")
+            if linked_entity and isinstance(linked_entity, dict):
+                return linked_entity
+
+        return entity_data
+
+    def _update_sync_count_for_selected_item(self, selected_item, entity_path, entity_id, entity_type):
+        """
+        Update the sync count display for the selected entity item.
+        This is called on-demand when a specific entity is selected.
+        Uses caching for improved performance.
+        """
+        try:
+            # First, immediately show "Checking..." status
+            self._display_sync_count_in_tree(selected_item, -1)  # Special value for checking
+
+            # Get sync count asynchronously to avoid blocking UI
+            def update_sync_display():
+                # Use cached version for better performance
+                sync_count = self._get_sync_count_for_entity_cached(entity_path)
+                self._display_sync_count_in_tree(selected_item, sync_count)
+                logger.debug(f"Updated sync count for {entity_type} {entity_id}: {sync_count}")
+
+            # Use shorter timer for faster response
+            QtCore.QTimer.singleShot(10, update_sync_display)  # Reduced from 100ms to 10ms
+
+        except Exception as e:
+            logger.error(f"Error updating sync count for selected item: {e}")
+
+    def _update_sync_count_for_intermediate_node(self, selected_item):
+        """
+        Update sync count for intermediate nodes (like asset types, statuses).
+        Shows aggregate sync count for all children.
+        """
+        # This is optional - you may want to show aggregate counts for folders
+        # For now, we'll just ensure the second column exists but leave it empty
+        preset = self._entity_presets.get(self._current_entity_preset)
+        if preset:
+            self._ensure_sync_column_exists(preset)
+
+    def _display_sync_count_in_tree(self, selected_item, sync_count):
+        """
+        Display the sync count in the tree view for the selected item.
+        Always displays the value, even if it's 0.
+        """
+        preset = self._entity_presets.get(self._current_entity_preset)
+        if not preset:
+            return
+
+        # Ensure the sync column exists
+        self._ensure_sync_column_exists(preset)
+
+        # Get the source model
+        proxy_model = preset.proxy_model
+        source_model = proxy_model.sourceModel()
+
+        # Create sync status message - always show a value
+        if sync_count == -1:
+            msg = "Checking..."
+        elif sync_count == 0:
+            msg = "Up to date"
+        else:
+            msg = "{} files".format(sync_count)
+
+        logger.debug(f"[SYNC DISPLAY] Setting sync status for item '{selected_item.text()}': {msg}")
+
+        # Find the sync item for this row
+        # We need to get the item in column 1 at the same tree level
+        parent = selected_item.parent()
+        row = selected_item.row()
+
+        # Create or get the sync status item
+        sync_item = None
+        if parent:
+            # Child item - get from parent
+            sync_item = parent.child(row, 1)
+            if not sync_item:
+                sync_item = QStandardItem()
+                parent.setChild(row, 1, sync_item)
+                logger.debug(f"Created new sync item as child at row {row}")
+        else:
+            # Root level item - get from model
+            sync_item = source_model.item(row, 1)
+            if not sync_item:
+                sync_item = QStandardItem()
+                source_model.setItem(row, 1, sync_item)
+                logger.debug(f"Created new sync item at root level row {row}")
+
+        # Update the sync item
+        sync_item.setText(msg)
+
+        # Set icon if available (no icon for "checking" state)
+        if sync_count >= 0:
+            sync_icon = self.sync_icons.get_sync_pixmap(sync_count)
+            if sync_icon:
+                sync_item.setIcon(sync_icon)
+            else:
+                sync_item.setIcon(QIcon())
+        else:
+            sync_item.setIcon(QIcon())  # Clear icon for checking state
+
+        # Ensure the item is visible in the view
+        view = preset.view
+        if view and sync_item.index().isValid():
+            # Map to proxy index if needed
+            proxy_index = proxy_model.mapFromSource(sync_item.index())
+            if proxy_index.isValid():
+                view.update(proxy_index)
+
+        # Force model update
+        if sync_item.index().isValid():
+            source_model.dataChanged.emit(sync_item.index(), sync_item.index())
+
+    def _ensure_sync_column_exists(self, preset):
+        """
+        Ensure the tree view has a second column for sync status.
+        """
+        proxy_model = preset.proxy_model
+        source_model = proxy_model.sourceModel()
+        view = preset.view
+
+        # Add second column if it doesn't exist
+        if source_model.columnCount() < 2:
+            source_model.setColumnCount(2)
+            source_model.setHorizontalHeaderLabels(["Name", "To Sync"])
+
+            # Configure view to show both columns
+            view.setHeaderHidden(False)
+            view.header().setStretchLastSection(False)
+            view.header().setSectionResizeMode(0, QHeaderView.Stretch)
+            view.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+            view.setSortingEnabled(True)
+
+    def _refresh_dependent_views(self):
+        """
+        Refresh views that depend on the selected entity data.
+        """
+        if self.main_view_mode == self.MAIN_VIEW_COLUMN:
+            logger.debug("Scheduling Column View update.")
+            QtCore.QTimer.singleShot(0, self._set_column_view_mode)
+        elif self.main_view_mode == self.MAIN_VIEW_SUBMITTED:
+            logger.debug("Scheduling Submitted View update.")
+            QtCore.QTimer.singleShot(0, self._populate_submitted_widget)
+        # Add other view modes as needed
+
+    def _after_syncing_operations(self):
+        """
+        Called after sync operations complete.
+        Invalidates cache for the current entity.
+        """
+        # Invalidate cache for the current entity path
+        if self._entity_path:
+            self._invalidate_sync_cache(self._entity_path)
+
+        # Original after sync operations
+        msg = "\n <span style='color:#2C93E2'>Syncing files is complete</span> \n"
+        self._add_log(msg, 2)
+        msg = "\n <span style='color:#2C93E2'>Reloading data ...</span> \n"
+        self._add_log(msg, 2)
+        self._status_model.hard_refresh()
+        self._publish_file_history_model.hard_refresh()
+        self._publish_model.hard_refresh()
+        self._setup_file_details_panel([])
+
+        if self.main_view_mode == self.MAIN_VIEW_COLUMN:
+            self._update_perforce_data()
+            self._populate_column_view_widget()
+
+    # ---------------------------------------------------
 
     def get_current_sg_data(self):
         """
