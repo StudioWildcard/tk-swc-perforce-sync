@@ -2,13 +2,32 @@ import os
 import datetime
 import threading
 
+from .qtwidgets import ContextWidget
+
 # Modern, direct Qt imports
-from sgtk.platform.qt import QtCore, QtGui
+# from sgtk.platform.qt import QtCore, QtGui
 from tank_vendor import shotgun_api3
+
+from tank.platform.qt import QtCore
+
+for name, cls in QtCore.__dict__.items():
+    if isinstance(cls, type): globals()[name] = cls
+
+from tank.platform.qt import QtGui
+
+for name, cls in QtGui.__dict__.items():
+    if isinstance(cls, type): globals()[name] = cls
 import sgtk
 
 # Set up logger
 logger = sgtk.platform.get_logger(__name__)
+
+task_manager = sgtk.platform.import_framework(
+    "tk-framework-shotgunutils", "task_manager"
+)
+shotgun_globals = sgtk.platform.import_framework(
+    "tk-framework-shotgunutils", "shotgun_globals"
+)
 
 
 class SubmitChangelistWidget(QtGui.QDialog):
@@ -27,8 +46,20 @@ class SubmitChangelistWidget(QtGui.QDialog):
         self.submit_widget_dict = file_dict or {}
         self.context_cache = {}
 
+        # create a background task manager
+        self._task_manager = task_manager.BackgroundTaskManager(
+            self, start_processing=True, max_threads=2
+        )
+
+        # register the data fetcher with the global schema manager
+        shotgun_globals.register_bg_task_manager(self._task_manager)
+
         # --- UI Setup ---
         self._setup_ui()
+
+        self.context_widget.set_up(self._task_manager)
+        # only allow entities that can be linked to PublishedFile entities
+        self.context_widget.restrict_entity_types_by_link("PublishedFile", "entity")
 
         # --- Initial Population ---
         self.update_buttons_state()
@@ -72,7 +103,8 @@ class SubmitChangelistWidget(QtGui.QDialog):
         self.main_layout.addLayout(self.button_layout)
 
     def _setup_info_widgets(self):
-        """Sets up the static info labels at the top of the dialog."""
+        """Sets up the static info labels at the top of the dialog - Vertical Layout Alternative."""
+        # Create labels
         self.changelist_label = QtGui.QLabel('Changelist:')
         self.changelist_value = QtGui.QLabel('')
         self.date_label = QtGui.QLabel('Date:')
@@ -82,17 +114,94 @@ class SubmitChangelistWidget(QtGui.QDialog):
         self.user_label = QtGui.QLabel('User:')
         self.user_value = QtGui.QLabel('')
 
-        self.top_layout.addWidget(self.changelist_label, 0, 0, QtCore.Qt.AlignRight)
-        self.top_layout.addWidget(self.changelist_value, 0, 1, QtCore.Qt.AlignLeft)
-        self.top_layout.addWidget(self.date_label, 1, 0, QtCore.Qt.AlignRight)
-        self.top_layout.addWidget(self.date_value, 1, 1, QtCore.Qt.AlignLeft)
-        self.top_layout.addWidget(self.workspace_label, 0, 2, QtCore.Qt.AlignRight)
-        self.top_layout.addWidget(self.workspace_value, 0, 3, QtCore.Qt.AlignLeft)
-        self.top_layout.addWidget(self.user_label, 1, 2, QtCore.Qt.AlignRight)
-        self.top_layout.addWidget(self.user_value, 1, 3, QtCore.Qt.AlignLeft)
+        # Style the labels and values
+        label_style = "font-weight: bold; color: #888;"
+        value_style = "color: #fff; padding-left: 5px;"
 
-        self.top_layout.setColumnStretch(1, 1)
-        self.top_layout.setColumnStretch(3, 1)
+        for label in [self.changelist_label, self.date_label, self.workspace_label, self.user_label]:
+            label.setStyleSheet(label_style)
+
+        for value in [self.changelist_value, self.date_value, self.workspace_value, self.user_value]:
+            value.setStyleSheet(value_style)
+
+        # Create context widget
+        self.details_item = QtGui.QWidget()
+        self.details_item.setObjectName(u"details_item")
+        self.context_widget = ContextWidget(self.details_item)
+        self.context_widget.setObjectName(u"context_widget")
+
+        # Create dividers
+        self.item_divider_1 = QFrame()
+        self.item_divider_1.setFrameShape(QFrame.HLine)
+        self.item_divider_1.setFrameShadow(QFrame.Sunken)
+
+        self.item_divider_2 = QFrame()
+        self.item_divider_2.setFrameShape(QFrame.VLine)
+        self.item_divider_2.setFrameShadow(QFrame.Sunken)
+
+        # Create left panel for context
+        left_panel = QtGui.QWidget()
+        left_layout = QtGui.QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 10, 0)  # Only right margin for spacing from divider
+        left_layout.setSpacing(5)  # Reduce spacing
+        left_layout.setAlignment(QtCore.Qt.AlignTop)  # Align content to top
+
+        context_label = QtGui.QLabel("Context")
+        context_label.setStyleSheet("font-weight: bold; font-size: 14px;")  # Removed margin-bottom
+        left_layout.addWidget(context_label)
+        left_layout.addWidget(self.context_widget)
+        # Remove the addStretch() to prevent extra space
+
+        # Create right panel for info
+        right_panel = QtGui.QWidget()
+        right_layout = QtGui.QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(10, 0, 0, 0)  # Only left margin for spacing from divider
+        right_layout.setSpacing(0)  # No spacing at top
+        right_layout.setAlignment(QtCore.Qt.AlignTop)  # Align content to top
+
+        # Title for the info section
+        info_title = QtGui.QLabel("Changelist Details")
+        info_title.setStyleSheet("font-weight: bold; font-size: 14px;")  # Reduced margin-bottom
+        right_layout.addWidget(info_title)
+
+        # Create a form-like layout for the info
+        info_widget = QtGui.QWidget()
+        info_layout = QtGui.QFormLayout(info_widget)
+        info_layout.setLabelAlignment(QtCore.Qt.AlignRight)
+        info_layout.setFieldGrowthPolicy(QtGui.QFormLayout.ExpandingFieldsGrow)
+        info_layout.setHorizontalSpacing(15)
+        info_layout.setVerticalSpacing(10)  # Increased from 5 to 10 for more space between rows
+        info_layout.setContentsMargins(0, 5, 0, 0)  # Add small top margin to align with context widget
+
+        # Add rows
+        info_layout.addRow(self.changelist_label, self.changelist_value)
+        info_layout.addRow(self.date_label, self.date_value)
+        info_layout.addRow(self.workspace_label, self.workspace_value)
+        info_layout.addRow(self.user_label, self.user_value)
+
+        right_layout.addWidget(info_widget)
+        # Remove the addStretch() to prevent extra space
+
+        # Clear and rebuild top layout
+        while self.top_layout.count():
+            item = self.top_layout.takeAt(0)
+            if item.widget():
+                item.widget().setParent(None)
+
+        # Main horizontal layout
+        main_h_layout = QtGui.QHBoxLayout()
+        main_h_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins
+        main_h_layout.setSpacing(0)  # No spacing between widgets and divider
+        main_h_layout.setAlignment(QtCore.Qt.AlignTop)  # Align all items to top
+        main_h_layout.addWidget(left_panel, 1)
+        main_h_layout.addWidget(self.item_divider_2)
+        main_h_layout.addWidget(right_panel, 2)
+
+        # Configure top layout with minimal spacing
+        self.top_layout.setSpacing(5)  # Small spacing between horizontal layout and divider
+        self.top_layout.setContentsMargins(10, 5, 10, 0)  # Reduced top/bottom margins
+        self.top_layout.addLayout(main_h_layout, 0, 0)
+        self.top_layout.addWidget(self.item_divider_1, 1, 0)
 
     def _setup_files_table(self):
         """Sets up the main table for displaying files."""
@@ -104,6 +213,12 @@ class SubmitChangelistWidget(QtGui.QDialog):
 
         # Enable sorting by clicking headers
         self.files_table_widget.setSortingEnabled(True)
+
+        # Enable full row selection
+        self.files_table_widget.setSelectionBehavior(QtGui.QAbstractItemView.SelectRows)
+
+        # Allow multiple row selection
+        self.files_table_widget.setSelectionMode(QtGui.QAbstractItemView.ExtendedSelection)
 
         # Allow columns to be interactively resized by the user
         header = self.files_table_widget.horizontalHeader()
@@ -285,73 +400,167 @@ class SubmitChangelistWidget(QtGui.QDialog):
         menu.exec_(self.files_table_widget.viewport().mapToGlobal(pos))
 
     def _on_change_context_triggered(self):
-        """Launches the ShotGrid Search Widget to select a new context."""
-        selected_rows = self.files_table_widget.selectionModel().selectedRows()
+        """Applies the context from self.context_widget to the selected rows."""
+        logger.debug("=== Change Context Triggered ===")
+
+        # Get selected rows using the selection model
+        selected_rows = []
+        selection_model = self.files_table_widget.selectionModel()
+        if selection_model.hasSelection():
+            # Get all selected indexes
+            selected_indexes = selection_model.selectedIndexes()
+            # Extract unique rows
+            selected_rows = sorted(list(set(index.row() for index in selected_indexes)))
+
+        logger.debug(f"Number of selected rows: {len(selected_rows)}")
+        logger.debug(f"Selected rows: {selected_rows}")
+
         if not selected_rows:
+            logger.warning("No rows selected")
             return
 
-        shotgun_search_widget = sgtk.platform.import_framework(
-            "tk-framework-qtwidgets", "shotgun_search_widget"
-        )
-        dialog = QtGui.QDialog(self)
-        dialog.setWindowTitle("Select a New Context")
-        dialog.setMinimumSize(500, 400)
-        layout = QtGui.QVBoxLayout(dialog)
-        search_widget = shotgun_search_widget.SearchWidget(dialog)
-        search_widget.set_search_entity_types(["Asset", "Shot", "Sequence", "Task"])
-        search_widget.set_placeholder_text("Search for an Asset, Shot, or Task...")
-
-        # Connect the selection signal to our handler
-        search_widget.entity_selected.connect(
-            lambda et, eid, en: self._apply_new_context(et, eid, en, selected_rows, dialog)
-        )
-        layout.addWidget(search_widget)
-        dialog.exec_()
-
-    def _apply_new_context(self, entity_type, entity_id, entity_name, selected_rows, dialog):
-        """Applies the selected context to the files selected in the table."""
-        logger.debug(f"Applying new context: {entity_type} {entity_id} ('{entity_name}')")
+        # Get the context from the context widget
         try:
-            tk = sgtk.sgtk_from_entity(entity_type, entity_id)
-            new_context = tk.context_from_entity(entity_type, entity_id)
-            new_context_str = str(new_context)
-            new_entity_dict = {"type": entity_type, "id": entity_id, "name": entity_name}
+            # The ContextWidget stores the current context in _context
+            if hasattr(self.context_widget, '_context'):
+                ctx = self.context_widget._context
+                logger.debug(f"Got context from widget._context: {ctx}")
+            else:
+                logger.error("ContextWidget does not have _context attribute")
+                QtGui.QMessageBox.warning(self, "Error", "Unable to get context from widget")
+                return
 
-            for model_index in selected_rows:
-                row = model_index.row()
+            logger.debug(f"Context type: {type(ctx)}")
+            if hasattr(ctx, '__dict__'):
+                logger.debug(f"Context attributes: {ctx.__dict__}")
+        except Exception as e:
+            logger.error(f"Unexpected error getting context: {e}", exc_info=True)
+            return
+
+        if not ctx:
+            logger.warning("Context is None or empty")
+            QtGui.QMessageBox.warning(self, "Warning", "No context selected in the widget.")
+            return
+
+        # Get the entity from the context (this should be the "Link" entity)
+        if hasattr(ctx, 'entity') and ctx.entity:
+            entity = ctx.entity
+            logger.debug(f"Entity from context: {entity}")
+        else:
+            logger.warning("No entity in context")
+            QtGui.QMessageBox.warning(self, "Warning", "No linkable entity in the context.")
+            return
+
+        entity_type = entity.get('type')
+        entity_id = entity.get('id')
+        entity_name = entity.get('name')
+
+        logger.debug(f"Entity details - Type: {entity_type}, ID: {entity_id}, Name: {entity_name}")
+
+        if not all([entity_type, entity_id, entity_name]):
+            logger.warning(f"Missing entity data - Type: {entity_type}, ID: {entity_id}, Name: {entity_name}")
+            QtGui.QMessageBox.warning(self, "Warning", "Invalid entity data in context.")
+            return
+
+        # Check if context has a task
+        if hasattr(ctx, 'task') and ctx.task:
+            logger.debug(f"Context has task: {ctx.task}")
+        else:
+            logger.debug("Context has no task")
+
+        # Apply the new context to selected rows
+        self._apply_new_context(entity_type, entity_id, entity_name, selected_rows, ctx)
+
+    def _apply_new_context(self, entity_type, entity_id, entity_name, selected_rows, ctx):
+        """Applies the selected context to the files selected in the table."""
+        logger.debug("=== Applying New Context ===")
+        logger.debug(f"Entity - Type: {entity_type}, ID: {entity_id}, Name: '{entity_name}'")
+        logger.debug(f"Number of rows to update: {len(selected_rows)}")
+
+        try:
+            # Determine the entity to use for context creation
+            # If there's a task in the context, use it for the context string
+            if hasattr(ctx, 'task') and ctx.task:
+                context_entity_type = 'Task'
+                context_entity_id = ctx.task.get('id')
+                logger.debug(f"Using task for context - Type: {context_entity_type}, ID: {context_entity_id}")
+            else:
+                context_entity_type = entity_type
+                context_entity_id = entity_id
+                logger.debug(f"Using entity for context - Type: {context_entity_type}, ID: {context_entity_id}")
+
+            # Get the context string
+            tk = sgtk.sgtk_from_entity(context_entity_type, context_entity_id)
+            new_context = tk.context_from_entity(context_entity_type, context_entity_id)
+            new_context_str = str(new_context)
+            logger.debug(f"Generated context string: {new_context_str}")
+
+            # Create the entity dictionary for the Link
+            new_entity_dict = {"type": entity_type, "id": entity_id, "name": entity_name}
+            logger.debug(f"New entity dict: {new_entity_dict}")
+
+            updated_count = 0
+            for row in selected_rows:
+                logger.debug(f"Processing row {row}")
+
                 file_item = self.files_table_widget.item(row, 1)
                 if not file_item:
+                    logger.warning(f"No file item in row {row}")
                     continue
+
                 dict_key = file_item.data(QtCore.Qt.UserRole)
+                logger.debug(f"Dict key for row {row}: {dict_key}")
+
                 if not dict_key or dict_key not in self.submit_widget_dict:
-                    logger.warning(f"Could not find data for row {row}. Skipping context update.")
+                    logger.warning(f"Could not find data for row {row}. Dict key: {dict_key}")
                     continue
+
+                # Log current values before update
+                current_entity_name = self.files_table_widget.item(row, 7).text()
+                current_context = self.files_table_widget.item(row, 9).text()
+                logger.debug(
+                    f"Row {row} - Current entity name: '{current_entity_name}', Current context: '{current_context}'")
 
                 # Update the underlying data dictionary
                 sg_item = self.submit_widget_dict[dict_key].setdefault("sg_item", {})
-                sg_item["entity"] = new_entity_dict
+                sg_item["entity"] = new_entity_dict  # This is the Link entity
                 sg_item["context"] = new_context_str
 
-                # Update the UI table
-                self.files_table_widget.item(row, 7).setText(entity_name)
-                self.files_table_widget.item(row, 8).setText(str(entity_id))
-                self.files_table_widget.item(row, 9).setText(new_context_str)
-                self.files_table_widget.item(row, 10).setText("Entity is recognizable")
+                # If there's a task in the context, store it as well
+                if hasattr(ctx, 'task') and ctx.task:
+                    sg_item["task"] = ctx.task
+                    logger.debug(f"Added task to sg_item: {ctx.task}")
 
-                # Update tooltips and reset text color
+                # Update the UI table
+                self.files_table_widget.item(row, 7).setText(entity_name)  # Entity Name column
+                self.files_table_widget.item(row, 8).setText(str(entity_id))  # Entity ID column
+                self.files_table_widget.item(row, 9).setText(new_context_str)  # Context column
+                self.files_table_widget.item(row, 10).setText("Entity is recognizable")  # Comment column
+
+                # Log new values after update
+                new_entity_name = self.files_table_widget.item(row, 7).text()
+                new_context = self.files_table_widget.item(row, 9).text()
+                logger.debug(f"Row {row} - New entity name: '{new_entity_name}', New context: '{new_context}'")
+
+                # Update tooltips and reset text color to indicate valid entity
                 for col in range(self.files_table_widget.columnCount()):
                     item = self.files_table_widget.item(row, col)
                     if item:
                         item.setToolTip(item.text())
-                        item.setForeground(QtGui.QApplication.style().standardPalette().color(QtGui.QPalette.Text))
+                        # Set text color to white/light grey instead of default
+                        item.setForeground(QtGui.QBrush(QtGui.QColor(230, 230, 230)))  # Light grey color
 
-            dialog.accept()
+                updated_count += 1
+
+            logger.debug(f"Successfully updated {updated_count} rows")
+
         except Exception as e:
             logger.error(f"Failed to apply new context: {e}", exc_info=True)
             QtGui.QMessageBox.critical(self, "Error", f"Failed to apply new context: {e}")
-            dialog.reject()
 
+        # Update button states since entity recognition status may have changed
         self.update_buttons_state()
+        logger.debug("=== Context Update Complete ===")
 
     # --- UI Action Handlers ---
 
