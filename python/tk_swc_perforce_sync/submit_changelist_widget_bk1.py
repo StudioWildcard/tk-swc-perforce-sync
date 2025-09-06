@@ -1,7 +1,6 @@
 import os
 import datetime
 import threading
-import json
 
 from .qtwidgets import ContextWidget
 
@@ -68,9 +67,6 @@ class SubmitChangelistWidget(QtGui.QDialog):
         # --- Initial Population ---
         self.update_buttons_state()
         self.populate_file_table()
-
-        # Load last saved state
-        self._load_saved_state()
 
     def _setup_ui(self):
         """Initializes and lays out all UI widgets."""
@@ -261,7 +257,7 @@ class SubmitChangelistWidget(QtGui.QDialog):
         self.select_all_button.clicked.connect(self.select_all)
         self.select_none_button.clicked.connect(self.select_none)
         self.submit_button.clicked.connect(self.submit_changelist)
-        self.save_button.clicked.connect(self.save_and_remember_state)
+        self.save_button.clicked.connect(self.save_changelist)
         self.cancel_button.clicked.connect(self.cancel_action)
 
         self.button_layout.addWidget(self.select_all_button)
@@ -350,17 +346,12 @@ class SubmitChangelistWidget(QtGui.QDialog):
             self.context_widget.set_context(contexts[0])
         else:
             # Multiple contexts - check if they're all the same
-            # Compare contexts by their entity information, not string representation
-            entity_info_list = []
-            for ctx in contexts:
-                if hasattr(ctx, 'entity') and ctx.entity:
-                    entity_key = (ctx.entity.get('type'), ctx.entity.get('id'))
-                    entity_info_list.append(entity_key)
+            # Compare contexts by their string representation
+            context_strs = [str(ctx) for ctx in contexts]
+            unique_contexts = set(context_strs)
 
-            unique_entities = set(entity_info_list)
-
-            if len(unique_entities) == 1:
-                # All contexts have the same entity
+            if len(unique_contexts) == 1:
+                # All contexts are the same
                 self.context_widget.enable_editing(
                     True,
                     "<p>Task and Entity Link for selected items:</p>"
@@ -370,7 +361,7 @@ class SubmitChangelistWidget(QtGui.QDialog):
                 # Different contexts - show multiple values
                 self.context_widget.enable_editing(
                     True,
-                    f"<p>Currently publishing items to {len(unique_entities)} contexts. Override all selected items here:</p>"
+                    f"<p>Currently publishing items to {len(unique_contexts)} contexts. Override all selected items here:</p>"
                 )
                 self.context_widget.set_context(
                     None,
@@ -552,8 +543,79 @@ class SubmitChangelistWidget(QtGui.QDialog):
 
     def _show_files_table_context_menu(self, pos):
         """Shows a context menu on right-click if rows are selected."""
-        # Context menu disabled since context can now be edited directly in the UI
-        return
+        if not self.files_table_widget.selectionModel().hasSelection():
+            return
+
+        menu = QtGui.QMenu(self)
+        change_context_action = menu.addAction("Change Context...")
+        change_context_action.triggered.connect(self._on_change_context_triggered)
+        menu.exec_(self.files_table_widget.viewport().mapToGlobal(pos))
+
+    def _on_change_context_triggered(self):
+        """Applies the context from self.context_widget to the selected rows."""
+        logger.debug("=== Change Context Triggered ===")
+
+        # Get selected rows using the selection model
+        selected_rows = self._get_selected_rows()
+
+        logger.debug(f"Number of selected rows: {len(selected_rows)}")
+        logger.debug(f"Selected rows: {selected_rows}")
+
+        if not selected_rows:
+            logger.warning("No rows selected")
+            return
+
+        # Get the context from the context widget
+        try:
+            # The ContextWidget stores the current context in _context
+            if hasattr(self.context_widget, '_context'):
+                ctx = self.context_widget._context
+                logger.debug(f"Got context from widget._context: {ctx}")
+            else:
+                logger.error("ContextWidget does not have _context attribute")
+                QtGui.QMessageBox.warning(self, "Error", "Unable to get context from widget")
+                return
+
+            logger.debug(f"Context type: {type(ctx)}")
+            if hasattr(ctx, '__dict__'):
+                logger.debug(f"Context attributes: {ctx.__dict__}")
+        except Exception as e:
+            logger.error(f"Unexpected error getting context: {e}", exc_info=True)
+            return
+
+        if not ctx:
+            logger.warning("Context is None or empty")
+            QtGui.QMessageBox.warning(self, "Warning", "No context selected in the widget.")
+            return
+
+        # Get the entity from the context (this should be the "Link" entity)
+        if hasattr(ctx, 'entity') and ctx.entity:
+            entity = ctx.entity
+            logger.debug(f"Entity from context: {entity}")
+        else:
+            logger.warning("No entity in context")
+            QtGui.QMessageBox.warning(self, "Warning", "No linkable entity in the context.")
+            return
+
+        entity_type = entity.get('type')
+        entity_id = entity.get('id')
+        entity_name = entity.get('name')
+
+        logger.debug(f"Entity details - Type: {entity_type}, ID: {entity_id}, Name: {entity_name}")
+
+        if not all([entity_type, entity_id, entity_name]):
+            logger.warning(f"Missing entity data - Type: {entity_type}, ID: {entity_id}, Name: {entity_name}")
+            QtGui.QMessageBox.warning(self, "Warning", "Invalid entity data in context.")
+            return
+
+        # Check if context has a task
+        if hasattr(ctx, 'task') and ctx.task:
+            logger.debug(f"Context has task: {ctx.task}")
+        else:
+            logger.debug("Context has no task")
+
+        # Apply the new context to selected rows
+        self._apply_new_context(entity_type, entity_id, entity_name, selected_rows, ctx)
 
     def _apply_new_context(self, entity_type, entity_id, entity_name, selected_rows, ctx):
         """Applies the selected context to the files selected in the table."""
@@ -694,9 +756,6 @@ class SubmitChangelistWidget(QtGui.QDialog):
             QtGui.QMessageBox.warning(self, "Warning", "No valid files selected for submission.")
             return
 
-        # Save the current state for next time
-        self._save_current_state()
-
         if file_info_deleted:
             self.parent.on_submit_deleted_files(self.change_sg_item, file_info_deleted)
         if file_info_other:
@@ -707,9 +766,8 @@ class SubmitChangelistWidget(QtGui.QDialog):
         self.parent._on_treeview_item_selected()
         self.accept()
 
-    def save_and_remember_state(self):
-        """Saves the changelist description via Perforce and remembers the current state."""
-        # Save to Perforce
+    def save_changelist(self):
+        """Saves the changelist description via Perforce."""
         description = self.changelist_description.toPlainText()
         change_id = self.changelist_value.text()
         try:
@@ -717,10 +775,6 @@ class SubmitChangelistWidget(QtGui.QDialog):
             changelist_spec['Description'] = description
             self.p4.save_change(changelist_spec)
             logger.debug(f"Changelist {change_id} saved successfully.")
-
-            # Save the current state for next time
-            self._save_current_state()
-
             self.parent._add_log("\n <span style='color:#2C93E2'>Updating the Pending view...</span> \n", 2)
             self.parent._populate_pending_widget()
             self.accept()
@@ -761,102 +815,3 @@ class SubmitChangelistWidget(QtGui.QDialog):
             return (int(head_change), key)
         except (ValueError, TypeError):
             return (str(head_change), key)
-
-    def _get_config_file_path(self):
-        """Get the path to the config file for saving/loading state."""
-        config_dir = os.path.expanduser("~/.config")
-        if not os.path.exists(config_dir):
-            os.makedirs(config_dir)
-        return os.path.join(config_dir, ".submit_changelist.txt")
-
-    def _save_current_state(self):
-        """Save the current context and changelist to a config file."""
-        try:
-            state = {}
-
-            # Save context information if available
-            if hasattr(self.context_widget, '_context') and self.context_widget._context:
-                ctx = self.context_widget._context
-                # Save entity information
-                if hasattr(ctx, 'entity') and ctx.entity:
-                    state['entity'] = {
-                        'type': ctx.entity.get('type'),
-                        'id': ctx.entity.get('id'),
-                        'name': ctx.entity.get('name')
-                    }
-                # Save task information
-                if hasattr(ctx, 'task') and ctx.task:
-                    state['task'] = {
-                        'type': ctx.task.get('type'),
-                        'id': ctx.task.get('id'),
-                        'name': ctx.task.get('name')
-                    }
-
-            # Save changelist information
-            state['changelist'] = {
-                'id': self.changelist_value.text(),
-                'description': self.changelist_description.toPlainText(),
-                'workspace': self.workspace_value.text(),
-                'user': self.user_value.text()
-            }
-
-            # Save a file path for context fallback
-            if self.submit_widget_dict:
-                # Get the first file path from the dictionary
-                first_file_info = next(iter(self.submit_widget_dict.values()), None)
-                if first_file_info and 'file' in first_file_info:
-                    state['last_file_path'] = first_file_info['file']
-                    logger.debug(f"Saved file path for context fallback: {first_file_info['file']}")
-
-            # Write to file
-            config_file = self._get_config_file_path()
-            with open(config_file, 'w') as f:
-                json.dump(state, f, indent=2)
-
-            logger.debug(f"Saved state to {config_file}")
-
-        except Exception as e:
-            logger.warning(f"Failed to save state: {e}")
-
-    def _load_saved_state(self):
-        """Load the last saved context and changelist from the config file."""
-        try:
-            config_file = self._get_config_file_path()
-            if not os.path.exists(config_file):
-                logger.debug(f"No saved state file found at {config_file}")
-                return
-
-            with open(config_file, 'r') as f:
-                state = json.load(f)
-
-            logger.debug(f"Loaded state from file: {state}")
-
-            # Try to restore context if available
-            if 'entity' in state or 'task' in state:
-                try:
-                    context = None
-                    # Priority to task if available
-                    if 'task' in state and state['task'].get('id'):
-                        logger.debug(f"Attempting to restore task context: {state['task']}")
-                        tk = sgtk.sgtk_from_entity(state['task']['type'], state['task']['id'])
-                        context = tk.context_from_entity(state['task']['type'], state['task']['id'])
-                    elif 'entity' in state and state['entity'].get('id'):
-                        logger.debug(f"Attempting to restore entity context: {state['entity']}")
-                        tk = sgtk.sgtk_from_entity(state['entity']['type'], state['entity']['id'])
-                        context = tk.context_from_entity(state['entity']['type'], state['entity']['id'])
-
-                    if context:
-                        # Need to enable editing first before setting context
-                        self.context_widget.enable_editing(
-                            True,
-                            "<p>Task and Entity Link (restored from previous session):</p>"
-                        )
-                        self.context_widget.set_context(context)
-                        logger.info(f"Successfully restored context: {context}")
-                    else:
-                        logger.warning("Could not create context from saved state")
-                except Exception as e:
-                    logger.error(f"Failed to restore context: {e}", exc_info=True)
-
-        except Exception as e:
-            logger.error(f"Failed to load saved state: {e}", exc_info=True)

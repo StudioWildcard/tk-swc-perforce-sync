@@ -350,17 +350,12 @@ class SubmitChangelistWidget(QtGui.QDialog):
             self.context_widget.set_context(contexts[0])
         else:
             # Multiple contexts - check if they're all the same
-            # Compare contexts by their entity information, not string representation
-            entity_info_list = []
-            for ctx in contexts:
-                if hasattr(ctx, 'entity') and ctx.entity:
-                    entity_key = (ctx.entity.get('type'), ctx.entity.get('id'))
-                    entity_info_list.append(entity_key)
+            # Compare contexts by their string representation
+            context_strs = [str(ctx) for ctx in contexts]
+            unique_contexts = set(context_strs)
 
-            unique_entities = set(entity_info_list)
-
-            if len(unique_entities) == 1:
-                # All contexts have the same entity
+            if len(unique_contexts) == 1:
+                # All contexts are the same
                 self.context_widget.enable_editing(
                     True,
                     "<p>Task and Entity Link for selected items:</p>"
@@ -370,7 +365,7 @@ class SubmitChangelistWidget(QtGui.QDialog):
                 # Different contexts - show multiple values
                 self.context_widget.enable_editing(
                     True,
-                    f"<p>Currently publishing items to {len(unique_entities)} contexts. Override all selected items here:</p>"
+                    f"<p>Currently publishing items to {len(unique_contexts)} contexts. Override all selected items here:</p>"
                 )
                 self.context_widget.set_context(
                     None,
@@ -799,14 +794,6 @@ class SubmitChangelistWidget(QtGui.QDialog):
                 'workspace': self.workspace_value.text(),
                 'user': self.user_value.text()
             }
-
-            # Save a file path for context fallback
-            if self.submit_widget_dict:
-                # Get the first file path from the dictionary
-                first_file_info = next(iter(self.submit_widget_dict.values()), None)
-                if first_file_info and 'file' in first_file_info:
-                    state['last_file_path'] = first_file_info['file']
-                    logger.debug(f"Saved file path for context fallback: {first_file_info['file']}")
 
             # Write to file
             config_file = self._get_config_file_path()
