@@ -1014,16 +1014,27 @@ class PublishIntegration(QtCore.QObject):
     # Delete/submit operations
     # -----------------------------------------------------------------------
 
-    def _delete_file_thread(self, p4, change, file_to_submit, log_callback):
-        """Function to delete a file in a separate thread."""
+    def _delete_file_thread(self, change, file_to_submit, log_callback):
+        """Function to delete a file in a separate thread.
+
+        Creates its own P4 connection per Perforce threading requirements.
+        """
+        thread_p4 = None
         try:
-            submit_result, perforce_msg = submit_and_delete_file(p4, change, file_to_submit)
+            thread_p4 = self._sync_manager.create_thread_connection()
+            submit_result, perforce_msg = submit_and_delete_file(thread_p4, change, file_to_submit)
             if submit_result and not perforce_msg:
                 log_callback(f"File deleted from Perforce: {file_to_submit}", 2)
             else:
                 log_callback(f"Error deleting file {file_to_submit}: {perforce_msg}", 4)
         except Exception as e:
             log_callback(f"Error deleting file {file_to_submit}: {str(e)}", 4)
+        finally:
+            if thread_p4:
+                try:
+                    thread_p4.disconnect()
+                except Exception:
+                    pass
 
     def _delete_pending_data(self, selected_tuples_to_delete):
         """Delete Depot Data in the Pending view that needs to be deleted."""
@@ -1035,7 +1046,7 @@ class PublishIntegration(QtCore.QObject):
             for change, file_to_submit in selected_tuples_to_delete:
                 thread = threading.Thread(
                     target=self._delete_file_thread,
-                    args=(self._p4, change, file_to_submit, self._add_log)
+                    args=(change, file_to_submit, self._add_log)
                 )
                 threads.append(thread)
                 thread.start()

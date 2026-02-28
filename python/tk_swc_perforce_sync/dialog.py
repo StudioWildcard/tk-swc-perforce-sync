@@ -118,8 +118,6 @@ class AppDialog(QWidget):
     # signal emitted whenever the selected publish changes
     # in either the main view or the details file_history view
     selection_changed = QtCore.Signal()
-    update_pending_view_signal = QtCore.Signal()
-    # update_pending_view_signal = pyqtQtCore.Signal()
 
     def __init__(self, action_manager, parent=None):
         super(AppDialog, self).__init__()  # Ensure proper parent initialization
@@ -174,6 +172,8 @@ class AppDialog(QWidget):
         self._sync_manager.log_message.connect(self._add_log)
         self._sync_manager.progress_update.connect(self._update_progress)
         self._sync_manager.sync_completed.connect(self._after_syncing_operations)
+        self._sync_manager.sync_info.connect(self._on_sync_info)
+        self.ui.cancel_sync.clicked.connect(self._on_cancel_sync)
         # Compatibility alias — other code still references self._p4 directly.
         # These will be migrated to manager access in subsequent extraction steps.
         self._p4 = self._sync_manager.p4
@@ -206,7 +206,6 @@ class AppDialog(QWidget):
         self.ui.get_latest_button.clicked.connect(self._get_latest)
         self.ui.submit_button.clicked.connect(self._submit_pending)
 
-        self.update_pending_view_signal.connect(self.update_pending_view)
         ###########################################
         # Shotgun Panel
         #
@@ -557,7 +556,7 @@ class AppDialog(QWidget):
             reload_treeview_fn=lambda: self._reload_treeview(),
             on_treeview_item_selected_fn=lambda: self._on_treeview_item_selected(),
             setup_file_details_panel_fn=lambda items: self._setup_file_details_panel(items),
-            do_sync_files_fn=lambda files: self._do_sync_files_threading_thread_2(files),
+            do_sync_files_fn=lambda files: self._sync_manager.sync_files_list(files),
             refresh_publish_data_fn=lambda: self.refresh_publish_data(),
         )
         # Compatibility aliases
@@ -1828,10 +1827,7 @@ class AppDialog(QWidget):
             try:
                 msg = f"Syncing {len(files_to_sync)} selected file(s)..."
                 self._add_log(msg, 2)
-                self._do_sync_files_threading_thread_2(files_to_sync)
-                self._refresh_column_view()
-                msg = f"Syncing of {len(files_to_sync)} file(s) complete."
-                self._add_log(msg, 2)
+                self._sync_manager.sync_files_list(files_to_sync)
             except Exception as e:
                 logger.error(f"Error during bulk sync: {e}")
                 self._add_log(f"Error during bulk sync: {e}", 2)
@@ -2584,17 +2580,6 @@ class AppDialog(QWidget):
     def _sync_current_file(self):
         files_to_sync, total_file_count = self._get_files_to_sync()
         self._sync_manager.sync_files_list(files_to_sync)
-        if files_to_sync:
-            self._add_log("\n <span style='color:#2C93E2'>Reloading data ...</span> \n", 2)
-            self._status_model.hard_refresh()
-            self._publish_file_history_model.hard_refresh()
-            self._publish_model.hard_refresh()
-            self._setup_file_details_panel([])
-
-            if self.main_view_mode == self.MAIN_VIEW_COLUMN:
-                self._populate_column_view_widget()
-
-            self._add_log("\n <span style='color:#2C93E2'>Reloading data is complete</span> \n", 2)
 
     def _sync_entity_parents(self):
         logger.debug("Getting entity parents")
@@ -2630,10 +2615,6 @@ class AppDialog(QWidget):
         return self._sync_manager.get_files_to_sync(
             self.ui.publish_view.model(), shotgun_model, SgLatestPublishModel)
 
-    def _do_sync_files_threading_thread_2(self, files_to_sync, entity=None):
-        """Delegate to PerforceSyncManager."""
-        self._sync_manager._do_sync_files_threading_thread_2(files_to_sync, entity)
-
     def _update_progress(self, value):
         """
         Updates the progress bar with the given value, ensuring thread-safe UI updates.
@@ -2641,10 +2622,37 @@ class AppDialog(QWidget):
         Args:
             value (float): Progress value between 0 and 100.
         """
+        logger.debug("_update_progress received %.1f%%", value)
         if not hasattr(self, '_progress_updater'):
             self._progress_updater = ProgressUpdater(self.ui.progress, self)
         self._progress_updater.update_progress.emit(value)
-        QtCore.QCoreApplication.processEvents()
+
+    def _on_sync_info(self, file_count, size_str):
+        """Called when sync provides file count and size info."""
+        if file_count == 0 and size_str:
+            # Dry-run in progress
+            self.ui.sync_status_label.setText(size_str)
+        elif size_str:
+            self.ui.sync_status_label.setText(
+                "Syncing {} files ({})...".format(file_count, size_str))
+        else:
+            self.ui.sync_status_label.setText(
+                "Syncing {} files...".format(file_count))
+        self.ui.sync_status_label.setVisible(True)
+        self.ui.cancel_sync.setVisible(True)
+        self.ui.cancel_sync.setEnabled(True)
+        self.ui.progress.setRange(0, 100)
+        self.ui.progress.setValue(0)
+        self.ui.progress.setVisible(True)
+        self.ui.sync_files.setEnabled(False)
+        self.ui.sync_parents.setEnabled(False)
+        self.ui.get_latest_button.setEnabled(False)
+
+    def _on_cancel_sync(self):
+        """Cancel the current sync operation."""
+        self._sync_manager.cancel_sync()
+        self.ui.sync_status_label.setText("Cancelling...")
+        self.ui.cancel_sync.setEnabled(False)
 
     def send_error_message(self, text):
         """
@@ -2668,7 +2676,6 @@ class AppDialog(QWidget):
         if not hasattr(self, '_log_updater'):
             self._log_updater = LogUpdater(self)
         self._log_updater.updateLog.emit(msg, flag)
-        QtCore.QCoreApplication.processEvents()
 
     def _to_sync(self, have_rev, head_rev):
         return PerforceSyncManager.to_sync(have_rev, head_rev)
@@ -4098,15 +4105,24 @@ class AppDialog(QWidget):
         Called after sync operations complete.
         Invalidates cache for the current entity.
         """
+        # Hide sync progress UI and restore determinate mode
+        self.ui.cancel_sync.setVisible(False)
+        self.ui.sync_status_label.setVisible(False)
+        self.ui.progress.setRange(0, 100)
+        self.ui.progress.setValue(0)
+        self.ui.progress.setVisible(False)
+
+        # Re-enable sync buttons
+        self.ui.sync_files.setEnabled(True)
+        self.ui.sync_parents.setEnabled(True)
+        self.ui.get_latest_button.setEnabled(True)
+
         # Invalidate cache for the current entity path
         if self._entity_path:
             self._invalidate_sync_cache(self._entity_path)
 
-        # Original after sync operations
-        msg = "\n <span style='color:#2C93E2'>Syncing files is complete</span> \n"
-        self._add_log(msg, 2)
-        msg = "\n <span style='color:#2C93E2'>Reloading data ...</span> \n"
-        self._add_log(msg, 2)
+        # Reload data
+        self._add_log("\n <span style='color:#2C93E2'>Reloading data ...</span> \n", 2)
         self._status_model.hard_refresh()
         self._publish_file_history_model.hard_refresh()
         self._publish_model.hard_refresh()
@@ -4709,21 +4725,6 @@ class EntityPreset(object):
         self.entity_type = entity_type
         self.publish_filters = publish_filters
 
-class UIWaitThread(QThread):
-    def __init__(self, check_ui_closed_callback, parent=None):
-        super(UIWaitThread, self).__init__(parent)
-        self.check_ui_closed_callback = check_ui_closed_callback
-
-    def run(self):
-        ui_is_open = True
-        while ui_is_open:
-            time.sleep(1)
-            ui_is_open = self.check_ui_closed_callback()
-            logger.debug("UI is open: {}".format(ui_is_open))
-        logger.debug("UI is closed, Updating pending view")
-        self.parent().update_pending_view_signal.emit()
-
-
 class MyLineEdit(QLineEdit):
     customTextChanged = QtCore.Signal(str)
 
@@ -4832,8 +4833,8 @@ class ProgressUpdater(QtCore.QObject):
         if not self._dialog or not self._progress_widget or not self._dialog.isVisible():
             logger.debug("Skipping progress update: dialog or progress widget is invalid or not visible")
             return
-        if 100 > value > 0:
-            self._progress_widget.setValue(int(value))
+        if value > 0:
+            int_val = max(1, min(int(value), 100))
+            logger.debug("ProgressUpdater setting bar to %d (raw=%.2f)", int_val, value)
+            self._progress_widget.setValue(int_val)
             self._progress_widget.setVisible(True)
-        else:
-            self._progress_widget.setVisible(False)
