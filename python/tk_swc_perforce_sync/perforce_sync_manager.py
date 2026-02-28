@@ -16,9 +16,12 @@ operations. Single source of truth for the P4 connection object.
 import os
 import time
 import threading
+try:
+    import queue
+except ImportError:
+    import Queue as queue
 
 import sgtk
-from P4 import Progress as P4Progress, OutputHandler as P4OutputHandler
 
 from sgtk.platform.qt import QtCore
 for name, cls in QtCore.__dict__.items():
@@ -28,94 +31,7 @@ from .utils import local_to_depot
 
 logger = sgtk.platform.get_logger(__name__)
 
-
-class SyncMonitor(P4Progress, P4OutputHandler):
-    """Combined P4 progress and output handler for real-time sync tracking.
-
-    Byte-level progress via P4.Progress: during parallel sync, callbacks
-    fire per-file with real transfer positions:
-        init(2) -> setDescription(path, 3) -> setTotal(kb) -> update(pos) x N -> done()
-
-    With --parallel, callbacks from multiple concurrent files interleave,
-    so we use a high-water mark to ensure the reported percentage only
-    ever increases.
-
-    outputStat fires in a batch before transfers begin — not useful for
-    progress but counted for final reporting.
-
-    Cancel is checked in update() — return non-zero to abort.
-    """
-
-    def __init__(self, progress_callback, cancel_check):
-        """
-        :param progress_callback: callable(percent) called with 0-100 float.
-        :param cancel_check: callable() -> bool, returns True to cancel sync.
-        """
-        P4Progress.__init__(self)
-        P4OutputHandler.__init__(self)
-        self.files_done = 0
-        self.total_files = 0
-        self.total_size_kb = 0
-        self._completed_kb = 0
-        self._current_file_total_kb = 0
-        self._high_water_pct = 0.0
-        self._progress_callback = progress_callback
-        self._cancel_check = cancel_check
-
-    # -- OutputHandler methods --
-
-    def outputStat(self, stat):
-        logger.debug("SyncMonitor.outputStat: %s", stat.get('depotFile', stat))
-        self.files_done += 1
-        return P4OutputHandler.HANDLED
-
-    def outputMessage(self, msg):
-        logger.debug("SyncMonitor.outputMessage: %s", msg)
-        return P4OutputHandler.HANDLED
-
-    def outputInfo(self, info):
-        logger.debug("SyncMonitor.outputInfo: %s", info)
-        return P4OutputHandler.HANDLED
-
-    def outputText(self, text):
-        return P4OutputHandler.HANDLED
-
-    def outputBinary(self, data):
-        return P4OutputHandler.HANDLED
-
-    # -- Progress methods --
-    # Per-file cycle: init(2) -> setDescription -> setTotal -> update x N -> done
-
-    def init(self, type):
-        logger.debug("SyncMonitor.init(type=%s)", type)
-
-    def setDescription(self, description, units):
-        logger.debug("SyncMonitor.setDescription(%s, units=%s)", description, units)
-
-    def setTotal(self, total):
-        self._current_file_total_kb = total
-        logger.debug("SyncMonitor.setTotal(%s)", total)
-
-    def update(self, position):
-        if self._cancel_check():
-            logger.debug("SyncMonitor.update -> CANCEL")
-            return 1
-        if self.total_size_kb > 0:
-            pct = min(((self._completed_kb + position) / self.total_size_kb) * 100.0, 100.0)
-            # Only report forward progress — parallel transfers interleave
-            # callbacks from multiple files so raw pct oscillates.
-            if pct > self._high_water_pct:
-                self._high_water_pct = pct
-                logger.debug("SyncMonitor.update(pos=%s) pct=%.1f%%", position, pct)
-                self._progress_callback(pct)
-        return 0
-
-    def done(self, fail):
-        logger.debug("SyncMonitor.done(fail=%s) file_kb=%s completed_kb=%s",
-                      fail, self._current_file_total_kb, self._completed_kb)
-        if fail == 0:
-            self._completed_kb += self._current_file_total_kb
-        self._current_file_total_kb = 0
+MAX_SYNC_THREADS = 16
 
 
 class PerforceSyncManager(QtCore.QObject):
@@ -127,12 +43,15 @@ class PerforceSyncManager(QtCore.QObject):
         log_message(str, int): Log message with flag level.
         progress_update(float): Progress bar value (0-100).
         sync_info(int, str): Emitted with (file_count, formatted_size) before sync.
+        clobber_prompt(list): Emitted with list of depot paths that couldn't overwrite
+            writable local files. Connect to prompt the user for force-sync.
     """
 
     sync_completed = QtCore.Signal()
     log_message = QtCore.Signal(str, int)
     progress_update = QtCore.Signal(float)
     sync_info = QtCore.Signal(int, str)
+    clobber_prompt = QtCore.Signal(list)
 
     def __init__(self, app, p4_framework, parent=None):
         super(PerforceSyncManager, self).__init__(parent)
@@ -143,8 +62,13 @@ class PerforceSyncManager(QtCore.QObject):
         self._drive = self._root_path[0:2] if self._root_path else ""
         self._sync_active = threading.Event()
         self._cancel_requested = False
-        self._sync_thread_p4 = None
-        self._sync_thread = None  # Reference to background sync thread
+        self._sync_thread = None
+        self._worker_connections = []  # P4 connections for active worker threads
+        self._worker_connections_lock = threading.Lock()
+
+        # Clobber prompt coordination between coordinator thread and UI
+        self._clobber_response = threading.Event()
+        self._clobber_force = False  # True = overwrite, False = skip
 
         # Sync count cache
         self._sync_count_cache = {}
@@ -342,42 +266,52 @@ class PerforceSyncManager(QtCore.QObject):
     def cancel_sync(self):
         """Cancel the current sync operation.
 
-        Sets the cancel flag (checked by P4.Progress.update) and force-
-        disconnects the sync thread's P4 connection to interrupt any
-        blocking network operation.  Because --parallel spawns child
-        transfer threads that may not stop immediately, we also clear
-        the sync-active flag and emit sync_completed so the UI resets
-        right away — the daemon thread will finish in the background.
+        Sets the cancel flag so workers stop picking new files, then
+        disconnects all worker P4 connections to interrupt any in-flight
+        file transfers. Also unblocks any pending clobber prompt wait.
         """
         self._cancel_requested = True
         self.log_message.emit(
-            "\n <span style='color:#FFD700'>Cancelling sync... "
-            "(background transfers may take a moment to stop)</span> \n", 2)
+            "\n <span style='color:#FFD700'>Cancelling sync...</span> \n", 2)
 
-        # Force-disconnect to interrupt the blocking run_sync.
-        p4 = self._sync_thread_p4
-        if p4:
-            try:
-                p4.disconnect()
-            except Exception:
-                pass
+        # Unblock coordinator if it's waiting for clobber response.
+        self._clobber_response.set()
 
-        # Reset state and notify UI immediately — don't wait for the
-        # parallel transfer threads to wind down.
+        # Disconnect all worker connections to interrupt in-flight syncs.
+        with self._worker_connections_lock:
+            for p4 in self._worker_connections:
+                try:
+                    p4.disconnect()
+                except Exception:
+                    pass
+
+        # Reset state and notify UI immediately.
         self._sync_active.clear()
         self.sync_completed.emit()
 
+    def respond_to_clobber(self, overwrite):
+        """Called by the UI after the user responds to the clobber prompt.
+
+        :param overwrite: True to force-sync writable files, False to skip them.
+        """
+        self._clobber_force = overwrite
+        self._clobber_response.set()
+
     def _start_sync_thread(self, depot_files=None, depot_wildcard=None):
-        """Start parallel sync in a background thread with real progress.
+        """Start a multi-threaded sync with file-count progress.
 
         Provide either depot_files (list of specific depot paths) or
         depot_wildcard (e.g. //depot/project/... for dry-run + sync).
 
-        Uses --parallel for speed. Requires P4Python >= 2025.2 for per-file
-        progress callbacks during parallel transfers (CanParallelProgress).
+        Before syncing, checks for writable local files that would cause
+        "can't clobber" errors.  If any are found, emits clobber_prompt
+        and blocks until the user responds (via respond_to_clobber).
+
+        Spawns up to MAX_SYNC_THREADS worker threads, each with its own
+        P4 connection, pulling files from a shared queue. Progress is
+        reported per completed file. Cancel disconnects all workers.
         """
-        # If a previous sync thread is still running (e.g. parallel transfer
-        # threads winding down after cancel), wait briefly then warn.
+        # If a previous sync thread is still running, wait briefly.
         if self._sync_thread and self._sync_thread.is_alive():
             logger.warning("Previous sync thread still running — waiting up to 5s...")
             self._sync_thread.join(timeout=5)
@@ -385,88 +319,197 @@ class PerforceSyncManager(QtCore.QObject):
                 logger.warning("Previous sync thread did not stop — starting new sync anyway.")
 
         self._cancel_requested = False
+        self._clobber_response.clear()
+        self._clobber_force = False
         self._sync_active.set()
 
-        def progress_fn(percent):
-            logger.debug("progress_fn emitting %.1f%%", percent)
-            self.progress_update.emit(percent)
-
-        def cancel_fn():
-            return self._cancel_requested
-
-        def thread_fn():
-            thread_p4 = None
+        def coordinator():
+            coord_p4 = None
             try:
-                thread_p4 = self.create_thread_connection()
-                self._sync_thread_p4 = thread_p4
+                coord_p4 = self.create_thread_connection()
 
-                # If wildcard, run dry-run first to discover files + sizes
+                # --- Discover files to sync ---
                 if depot_wildcard:
                     logger.info("Running dry-run sync on: {}".format(depot_wildcard))
                     self.sync_info.emit(0, "Checking...")
-                    sync_preview = thread_p4.run_sync("-n", depot_wildcard)
+                    sync_preview = coord_p4.run_sync("-n", depot_wildcard)
 
-                    files = []
+                    file_entries = []
                     if isinstance(sync_preview, list):
-                        files = [e["depotFile"] for e in sync_preview
-                                 if isinstance(e, dict) and "depotFile" in e]
+                        file_entries = [e for e in sync_preview
+                                        if isinstance(e, dict) and "depotFile" in e]
 
-                    if not files:
+                    if not file_entries:
                         self.log_message.emit(
                             "\n <span style='color:#2C93E2'>All files are up to date.</span> \n", 2)
                         return
 
-                    # Extract total size — try summary field first, fall back to summing
+                    files = [e["depotFile"] for e in file_entries]
+
+                    # Extract total size
                     last = sync_preview[-1] if sync_preview else {}
                     total_size = int(last.get("totalFileSize", 0)) if isinstance(last, dict) else 0
                     if total_size == 0:
-                        for entry in sync_preview:
-                            if isinstance(entry, dict) and "fileSize" in entry:
+                        for entry in file_entries:
+                            if "fileSize" in entry:
                                 total_size += int(entry["fileSize"])
                     size_str = self._format_size(total_size)
                     self.sync_info.emit(len(files), size_str)
                     logger.info("Dry-run found {} files ({})".format(len(files), size_str))
+
+                    # Build depot->local path map from dry-run results
+                    depot_to_local = {}
+                    for entry in file_entries:
+                        client_file = entry.get("clientFile")
+                        if client_file:
+                            depot_to_local[entry["depotFile"]] = client_file
                 else:
                     files = depot_files
                     total_size = 0
+                    depot_to_local = {}
+                    # For pre-selected files, build the path map
+                    for depot_file in files:
+                        local = self.get_client_file(depot_file)
+                        if local:
+                            depot_to_local[depot_file] = local
 
                 if self._cancel_requested:
                     return
 
-                # Parallel sync with byte-level progress via P4.Progress
-                monitor = SyncMonitor(progress_fn, cancel_fn)
-                monitor.total_files = len(files)
-                # total_size from dry-run is bytes; P4.Progress reports in KB
-                monitor.total_size_kb = total_size // 1024 if total_size else 0
-                file_args = ["{}#head".format(f) for f in files]
+                # --- Pre-check for writable files that would cause clobber ---
+                writable_files = []
+                for depot_file in files:
+                    local_path = depot_to_local.get(depot_file)
+                    if local_path and os.path.isfile(local_path):
+                        try:
+                            if os.access(local_path, os.W_OK):
+                                writable_files.append(depot_file)
+                        except OSError:
+                            pass
 
-                old_handler = thread_p4.handler
-                old_progress = thread_p4.progress
-                thread_p4.handler = monitor
-                thread_p4.progress = monitor
-                logger.debug("Assigned handler=%s progress=%s to thread_p4",
-                             thread_p4.handler, thread_p4.progress)
-                try:
+                force_files = set()  # depot paths to sync with -f
+                if writable_files:
+                    logger.info("Found {} writable file(s) that would be clobbered".format(
+                        len(writable_files)))
                     self.log_message.emit(
-                        "\n <span style='color:#2C93E2'>Starting sync of {} files...</span> \n".format(
-                            len(files)), 2)
-                    logger.debug("Calling run_sync with --parallel on %d files", len(files))
-                    thread_p4.run_sync(
-                        "--parallel=threads=0,batch=8,batchsize=524288,min=9,minsize=589824",
-                        *file_args,
-                    )
-                    logger.debug("run_sync returned, files_done=%d", monitor.files_done)
-                finally:
-                    thread_p4.handler = old_handler
-                    thread_p4.progress = old_progress
+                        "\n <span style='color:#FFD700'>Found {} writable file(s) — "
+                        "waiting for user response...</span> \n".format(len(writable_files)), 2)
 
+                    # Emit prompt and block until user responds
+                    self._clobber_response.clear()
+                    self.clobber_prompt.emit(list(writable_files))
+                    self._clobber_response.wait()
+
+                    if self._cancel_requested:
+                        return
+
+                    if self._clobber_force:
+                        force_files = set(writable_files)
+                        logger.info("User chose to overwrite %d writable file(s)", len(force_files))
+                    else:
+                        # Skip writable files
+                        skip_set = set(writable_files)
+                        files = [f for f in files if f not in skip_set]
+                        logger.info("User chose to skip %d writable file(s), %d files remain",
+                                    len(skip_set), len(files))
+                        if not files:
+                            self.log_message.emit(
+                                "\n <span style='color:#2C93E2'>All remaining files skipped.</span> \n", 2)
+                            return
+
+                total = len(files)
+                completed = [0]
+                completed_lock = threading.Lock()
+                errors = []
+
+                # --- Build file queue ---
+                file_queue = queue.Queue()
+                for f in files:
+                    file_queue.put(f)
+
+                # --- Worker function ---
+                def worker(worker_p4):
+                    while not self._cancel_requested:
+                        try:
+                            depot_file = file_queue.get_nowait()
+                        except queue.Empty:
+                            break
+                        file_name = depot_file.rsplit("/", 1)[-1]
+                        try:
+                            logger.debug("Worker syncing: %s", depot_file)
+                            if depot_file in force_files:
+                                worker_p4.run_sync("-f", "{}#head".format(depot_file))
+                            else:
+                                worker_p4.run_sync("{}#head".format(depot_file))
+                        except Exception as e:
+                            if self._cancel_requested:
+                                break
+                            logger.error("Failed to sync %s: %s", depot_file, e)
+                            errors.append((depot_file, str(e)))
+                        with completed_lock:
+                            completed[0] += 1
+                            count = completed[0]
+                            pct = (count / total) * 100.0
+                        self.log_message.emit("({}/{}) {}".format(count, total, file_name), 3)
+                        self.progress_update.emit(pct)
+
+                # --- Create connections and spawn workers ---
+                num_workers = min(MAX_SYNC_THREADS, total)
+                self.log_message.emit(
+                    "\n <span style='color:#2C93E2'>Starting sync of {} files "
+                    "({} threads)...</span> \n".format(total, num_workers), 2)
+                logger.info("Spawning %d sync workers for %d files", num_workers, total)
+
+                worker_connections = []
+                try:
+                    # Create all connections sequentially.
+                    # Reuse coord_p4 as the first worker connection.
+                    worker_connections.append(coord_p4)
+                    for i in range(1, num_workers):
+                        if self._cancel_requested:
+                            break
+                        wp4 = self.create_thread_connection()
+                        worker_connections.append(wp4)
+
+                    # Register connections so cancel_sync() can disconnect them
+                    with self._worker_connections_lock:
+                        self._worker_connections = list(worker_connections)
+
+                    # Spawn worker threads
+                    workers = []
+                    for wp4 in worker_connections:
+                        if self._cancel_requested:
+                            break
+                        w = threading.Thread(target=worker, args=(wp4,), daemon=True)
+                        workers.append(w)
+                        w.start()
+
+                    # Wait for all workers to finish
+                    for w in workers:
+                        w.join()
+
+                finally:
+                    with self._worker_connections_lock:
+                        self._worker_connections = []
+                    for wp4 in worker_connections[1:]:
+                        try:
+                            wp4.disconnect()
+                        except Exception:
+                            pass
+
+                # --- Report results ---
                 if self._cancel_requested:
                     self.log_message.emit(
-                        "\n <span style='color:#FFD700'>Sync cancelled.</span> \n", 2)
+                        "\n <span style='color:#FFD700'>Sync cancelled ({}/{} files synced).</span> \n".format(
+                            completed[0], total), 2)
+                elif errors:
+                    self.log_message.emit(
+                        "\n <span style='color:#FFD700'>Sync complete with {} error(s) ({}/{} files).</span> \n".format(
+                            len(errors), completed[0], total), 2)
                 else:
                     self.log_message.emit(
                         "\n <span style='color:#2C93E2'>Sync complete ({} files).</span> \n".format(
-                            monitor.files_done), 2)
+                            completed[0]), 2)
 
             except Exception as e:
                 if self._cancel_requested:
@@ -477,20 +520,18 @@ class PerforceSyncManager(QtCore.QObject):
                     self.log_message.emit(
                         "\n <span style='color:#CC3333'>Sync failed: {}</span> \n".format(e), 2)
             finally:
-                self._sync_thread_p4 = None
-                if thread_p4:
+                if coord_p4:
                     try:
-                        thread_p4.disconnect()
+                        coord_p4.disconnect()
                     except Exception:
                         pass
-                # Only emit sync_completed if cancel_sync() hasn't already.
                 was_active = self._sync_active.is_set()
                 self._sync_active.clear()
                 self._cancel_requested = False
                 if was_active:
                     self.sync_completed.emit()
 
-        self._sync_thread = threading.Thread(target=thread_fn, daemon=True)
+        self._sync_thread = threading.Thread(target=coordinator, daemon=True)
         self._sync_thread.start()
 
     @staticmethod

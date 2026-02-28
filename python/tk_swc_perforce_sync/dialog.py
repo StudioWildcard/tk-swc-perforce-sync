@@ -173,6 +173,7 @@ class AppDialog(QWidget):
         self._sync_manager.progress_update.connect(self._update_progress)
         self._sync_manager.sync_completed.connect(self._after_syncing_operations)
         self._sync_manager.sync_info.connect(self._on_sync_info)
+        self._sync_manager.clobber_prompt.connect(self._on_clobber_prompt)
         self.ui.cancel_sync.clicked.connect(self._on_cancel_sync)
         # Compatibility alias — other code still references self._p4 directly.
         # These will be migrated to manager access in subsequent extraction steps.
@@ -2653,6 +2654,37 @@ class AppDialog(QWidget):
         self._sync_manager.cancel_sync()
         self.ui.sync_status_label.setText("Cancelling...")
         self.ui.cancel_sync.setEnabled(False)
+
+    def _on_clobber_prompt(self, depot_files):
+        """Prompt user before syncing writable files that P4 would refuse to overwrite."""
+        count = len(depot_files)
+        file_list = "\n".join(f.rsplit("/", 1)[-1] for f in depot_files[:20])
+        if count > 20:
+            file_list += "\n... and {} more".format(count - 20)
+
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Writable Files Detected")
+        msg.setText(
+            "{} file(s) are writable on disk but not checked out in Perforce.\n"
+            "These files will be skipped unless you choose to overwrite them.".format(count))
+        msg.setDetailedText(file_list)
+        overwrite_btn = msg.addButton("Overwrite All", QMessageBox.AcceptRole)
+        skip_btn = msg.addButton("Skip These", QMessageBox.RejectRole)
+        cancel_btn = msg.addButton("Cancel Sync", QMessageBox.DestructiveRole)
+        msg.exec_()
+
+        clicked = msg.clickedButton()
+        if clicked == cancel_btn:
+            self._sync_manager.cancel_sync()
+        elif clicked == overwrite_btn:
+            self._add_log(
+                "\n <span style='color:#2C93E2'>Overwriting {} writable file(s)...</span> \n".format(count), 2)
+            self._sync_manager.respond_to_clobber(overwrite=True)
+        else:
+            self._add_log(
+                "\n <span style='color:#FFD700'>Skipping {} writable file(s)...</span> \n".format(count), 2)
+            self._sync_manager.respond_to_clobber(overwrite=False)
 
     def send_error_message(self, text):
         """
