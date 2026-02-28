@@ -172,14 +172,6 @@ class ChangelistSelection(QDialog):
 
 
 
-    def convert_to_relative_path(self, absolute_path):
-        # Split the path on ":/" and take the second part, if it exists
-        parts = absolute_path.split(":/", 1)
-        relative_path = parts[1] if len(parts) > 1 else absolute_path
-
-        return relative_path
-
-
     def send_error_message(self, text):
         """
         Send error message

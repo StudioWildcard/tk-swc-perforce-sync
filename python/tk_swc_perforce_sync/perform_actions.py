@@ -14,18 +14,9 @@ class PerformActions():
         self.description = "{} file".format(action)
         if desc:
             self.description = desc.strip()
-        self.status_dict = {
-            "add": "p4add",
-            "move/add": "p4add",
-            "delete": "p4del",
-            "edit": "p4edit"
-        }
-        self.action_dict = {
-            "add": "add",
-            "move/add": "add",
-            "delete": "delete",
-            "edit": "edit"
-        }
+        from .constants import STATUS_MAP, ACTION_MAP
+        self.status_dict = STATUS_MAP
+        self.action_dict = ACTION_MAP
 
     def run(self):
         """

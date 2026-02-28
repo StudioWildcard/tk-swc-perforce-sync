@@ -35,35 +35,8 @@ class PublishedFileSPerforce(QTreeView):
         self.table_view = QTableView(self)
         self.layout.addWidget(self.table_view)
 
-        self._extension_types = {
-            "wire": "Alias File",
-            "abc": "Alembic Cache",
-            "max": "3dsmax Scene",
-            "hrox": "NukeStudio Project",
-            "hip": "Houdini Scene",
-            "hipnc": "Houdini Scene",
-            "hiplc": "Houdini Scene",
-            "ma": "Maya Scene",
-            "mb": "Maya Scene",
-            "fbx": "Motion Builder FBX",
-            "nk": "Nuke Script",
-            "psd": "Photoshop Image",
-            "psb": "Photoshop Image",
-            "vpb": "VRED Scene",
-            "vpe": "VRED Scene",
-            "osb": "VRED Scene",
-            "dpx": "Rendered Image",
-            "exr": "Rendered Image",
-            "tiff": "Texture",
-            "tx": "Texture",
-            "tga": "Texture",
-            "dds": "Texture",
-            "jpeg": "Image",
-            "jpg": "Image",
-            "mov": "Movie",
-            "mp4": "Movie",
-            "pdf": "PDF",
-        }
+        from .constants import EXTENSION_TYPE_MAP
+        self._extension_types = EXTENSION_TYPE_MAP
 
         self.setup_table()
 

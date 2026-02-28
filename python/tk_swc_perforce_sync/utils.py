@@ -61,6 +61,17 @@ class ResizeEventFilter(QtCore.QObject):
         # pass it on!
         return False
 
+def local_to_depot(local_path):
+    """
+    Convert a local file path to a Perforce depot path.
+
+    Example: 'B:\\Ark2Depot\\Content\\...' -> '//Ark2Depot/Content/...'
+    """
+    depot_path = local_path[2:].lstrip("\\")
+    depot_path = depot_path.replace("\\", "/")
+    return "//" + depot_path
+
+
 class Icons(object):
     def __init__(self):
         self.repo_root = os.path.normpath(
@@ -381,29 +392,6 @@ def resolve_filters(filters):
         resolved_filters.append(resolved_filter)
     return resolved_filters
 
-def get_action_icon(action):
-    """ Get the icon for the action
-    """
-    repo_root = os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "..")
-    )
-    p4_file_add_path = os.path.join(repo_root, "icons/p4_file_add.png")
-    p4_file_add_icon = QtGui.QIcon(QtGui.QPixmap(p4_file_add_path))
-
-    p4_file_edit_path = os.path.join(repo_root, "icons/p4_file_edit.png")
-    p4_file_edit_icon = QtGui.QIcon(QtGui.QPixmap(p4_file_edit_path))
-
-    p4_file_delete_path = os.path.join(repo_root, "icons/p4_file_delete.png")
-    p4_file_delete_icon = QtGui.QIcon(QtGui.QPixmap(p4_file_delete_path))
-
-    if action in ["add", "edit", "delete", "move/add"]:
-        if action == "edit":
-            return p4_file_edit_icon, p4_file_edit_path
-        elif action == "delete":
-            return p4_file_delete_icon, p4_file_delete_path
-        else:
-            return p4_file_add_icon, p4_file_add_path
-    return None, None
 
 def check_validity_by_path_parts(swc_fw, sg_item):
     """
@@ -433,31 +421,6 @@ def check_validity_by_path_parts(swc_fw, sg_item):
 
     return None, None
 
-
-def check_validity_by_path_parts_1(swc_fw, sg_item):
-    """
-    Check if the filepath leads to a valid ShotGrid entity
-    :param sg_item: ShotGrid item information
-    :return: entity and published file info if found, None otherwise
-    """
-    target_context = None
-    if not sg_item or "path" not in sg_item:
-        return None, None
-
-    logger.debug(f">>>>> Checking validity by path parts: sg_item: {sg_item}")
-
-    local_path = sg_item["path"].get("local_path", None)
-
-    try:
-        target_context = swc_fw.find_task_context(local_path)
-    except(AttributeError):
-        logger.debug(f">>>>> {AttributeError}")
-
-    if target_context:
-        entity = target_context
-        return entity, None
-
-    return None, None
 
 def check_validity_by_published_file(sg_item):
     """

@@ -10,58 +10,28 @@ class PerforceData():
         self._sg_data = sg_data
         self._p4 = None
         self._connect()
-        self._peforce_data = {}
-        self.status_dict = {
-            "add": "p4add",
-            "delete": "p4del",
-            "edit": "p4edit"
-        }
-        self.settings = {
-            "wire": "Alias File",
-            "abc": "Alembic Cache",
-            "max": "3dsmax Scene",
-            "hrox": "NukeStudio Project",
-            "hip": "Houdini Scene",
-            "hipnc": "Houdini Scene",
-            "hiplc": "Houdini Scene",
-            "ma": "Maya Scene",
-            "mb": "Maya Scene",
-            "fbx": "Motion Builder FBX",
-            "nk": "Nuke Script",
-            "psd": "Photoshop Image",
-            "psb": "Photoshop Image",
-            "vpb": "VRED Scene",
-            "vpe": "VRED Scene",
-            "osb": "VRED Scene",
-            "dpx": "Rendered Image",
-            "exr": "Rendered Image",
-            "tiff": "Texture",
-            "tx": "Texture",
-            "tga": "Texture",
-            "dds": "Texture",
-            "jpeg": "Image",
-            "jpg": "Image",
-            "mov": "Movie",
-            "mp4": "Movie",
-            "pdf": "PDF"
-        }
+        self._perforce_data = {}
+        from .constants import STATUS_MAP
+        self.status_dict = STATUS_MAP
+        from .constants import EXTENSION_TYPE_MAP
+        self.settings = EXTENSION_TYPE_MAP
 
-    def _get_peforce_data(self):
+    def _get_perforce_data(self):
         sg_data_to_publish = None
         fstat_dict = {}
         # logger.debug(">>>>>>>>>>  self._sg_data is {}".format(self._sg_data))
         if self._sg_data:
             #if len(self._sg_data) <= 1:
             #    logger.debug(">>>>>>>>>>  Processing small data")
-            #    self._sg_data = self._get_small_peforce_data(self._sg_data)
+            #    self._sg_data = self._get_small_perforce_data(self._sg_data)
             #else:
             logger.debug(">>>>>>>>>>  Processing large data ..")
-            sg_data_to_publish, fstat_dict = self._get_large_peforce_data()
+            sg_data_to_publish, fstat_dict = self._get_large_perforce_data()
             #logger.debug(">>>>>  sg_data_to_publish is: {}".format(sg_data_to_publish))
             #logger.debug("<<<<<<<<<  fstat_dict is: {}".format(fstat_dict))
         return sg_data_to_publish, fstat_dict
 
-    def _get_large_peforce_data(self):
+    def _get_large_perforce_data(self):
         """"
         Get large perforce data
         """
@@ -244,18 +214,8 @@ class PerforceData():
             file_path = file_path.lower()
         return file_path
 
-    def _get_item_path(self, local_path):
-        """
-        Get item path
-        """
-        item_path = ""
-        if local_path:
-            local_path = local_path.split("\\")
-            local_path = local_path[:7]
-            item_path = "\\".join(local_path)
-        return item_path
 
-    def _get_small_peforce_data(self):
+    def _get_small_perforce_data(self):
         """"
         Get small perforce data
         """
@@ -296,17 +256,6 @@ class PerforceData():
         if head_rev_int > 0 and have_rev_int < head_rev_int:
             return True
         return False
-
-    def _get_depot_path(self, local_path):
-        """
-        Convert local path to depot path
-        For example, convert: 'B:\\Ark2Depot\\Content\\Base\\Characters\\Human\\Survivor\\Armor\\Cloth_T3\\_ven\\MDL\\Survivor_M_Armor_Cloth_T3_MDL.fbx'
-        to "//Ark2Depot/Content/Base/Characters/Human/Survivor/Armor/Cloth_T3/_ven/MDL/Survivor_M_Armor_Cloth_T3_MDL.fbx"
-        """
-        local_path = local_path[2:]
-        depot_path = local_path.replace("\\", "/")
-        depot_path = "/{}".format(depot_path)
-        return depot_path
 
     def _connect(self):
         """

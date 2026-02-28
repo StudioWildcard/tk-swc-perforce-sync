@@ -14,6 +14,7 @@ import sgtk
 from sgtk.util import login
 
 from .changelist_selection_operation import ChangelistSelection
+from .utils import Icons, local_to_depot
 
 logger = sgtk.platform.get_logger(__name__)
 
@@ -519,15 +520,7 @@ class SWCTreeView(QTreeView):
 
 
     def get_depot_filepath(self, local_path):
-
-        # Convert local path to depot path
-        # For example, convert: 'B:\\Ark2Depot\\Content\\Base\\Characters\\Human\\Survivor\\Armor\\Cloth_T3\\_ven\\MDL\\Survivor_M_Armor_Cloth_T3_MDL.fbx'
-        # to "//Ark2Depot/Content/Base/Characters/Human/Survivor/Armor/Cloth_T3/_ven/MDL/Survivor_M_Armor_Cloth_T3_MDL.fbx"
-
-        local_path = local_path[2:]
-        depot_path = local_path.replace("\\", "/")
-        depot_path = "/{}".format(depot_path)
-        return depot_path
+        return local_to_depot(local_path)
 
     def perform_changelist_selection(self, selected_actions):
         perform_action = ChangelistSelection(self.p4, selected_actions=selected_actions, parent=self.parent)
@@ -612,14 +605,7 @@ class TreeViewWidget(QWidget):
         pending_image_path = os.path.join(self.repo_root, "icons/mode_switch_pending_active.png")
         self.pending_icon = QIcon(QPixmap(pending_image_path))
 
-        p4_file_add_path = os.path.join(self.repo_root, "icons/p4_file_add.png")
-        self.p4_file_add_icon = QIcon(QPixmap(p4_file_add_path))
-
-        p4_file_edit_path = os.path.join(self.repo_root, "icons/p4_file_edit.png")
-        self.p4_file_edit_icon = QIcon(QPixmap(p4_file_edit_path))
-
-        p4_file_delete_path = os.path.join(self.repo_root, "icons/p4_file_delete.png")
-        self.p4_file_delete_icon = QIcon(QPixmap(p4_file_delete_path))
+        self._icons = Icons()
 
     def set_mode(self):
         self.tree_view.set_mode(self.mode)
@@ -789,99 +775,6 @@ class TreeViewWidget(QWidget):
             depot_item = DepotItem(key=key, data=depot_str, icon=action_icon, enabled=enable_change_item, size_hint=size_hint)
             return depot_item
         return None
-
-    def populate_treeview_widget_submitted_old(self):
-        """
-        Populate treeview widget with data from data_dict
-        """
-        self.publish_dict = {}
-        parent_icon = self.submitted_icon
-        node_dictionary = self._get_change_dictionary_submitted(self.data_dict)
-
-        for i, key in enumerate(node_dictionary.keys()):
-            if key:
-                logger.debug("<<<<<<<  key: {}".format(key))
-                key_str = str(key)
-                change_item = QStandardItem(key_str)
-                # change_item must allow drops, but cannot be dragged
-                change_item.setFlags(
-                    (change_item.flags() | Qt.ItemFlag.ItemIsDropEnabled) & ~Qt.ItemFlag.ItemIsDragEnabled
-                )
-
-                msg = "Changelist# {}".format(key)
-                change_item.setToolTip(msg)
-                change_item.setData(key, QtCore.Qt.UserRole)
-                change_item.setSizeHint(QSize(0, 25))
-                change_item.setEditable(False)
-                self.model.appendRow([change_item])
-
-                self.tree_view.setFirstColumnSpanned(i, self.tree_view.rootIndex(), True)
-                enable_change_item = False
-                if node_dictionary[key]:
-
-                    for j, sg_item in enumerate(node_dictionary[key]):
-                        logger.debug("<<<<<<<  setting file ...")
-                        if 'changeListInfo' in sg_item:
-                            publish_time_txt = self._get_publish_time_info(sg_item)
-                            user_name_txt = self._get_user_name_info(sg_item)
-                            description_txt = self._get_description_info(sg_item)
-
-                            msg = "{} \t {} \t {} \t {}".format(key, publish_time_txt, user_name_txt, description_txt)
-                            change_item.setText(msg)
-                        else:
-
-                            depot_path = sg_item.get("depotFile", None)
-                            head_rev = sg_item.get("headRev", "0")
-                            revision = sg_item.get("revision", None)
-                            is_published = sg_item.get("Published", None)
-                            if not is_published:
-                                enable_change_item = True
-                            action = self._get_action(sg_item)
-                            action_icon = self.get_action_icon(action)
-                            if depot_path:
-                                depot_str = depot_path
-                                if head_rev != "0":
-                                    if revision:
-                                        depot_str = "{}{}".format(depot_path, revision)
-                                    else:
-                                        depot_str = "{}#{}".format(depot_path, head_rev)
-                                depot_item = QStandardItem(depot_str)
-                                # depot_item can be dragged, but must not accept drops
-                                depot_item.setFlags(
-                                    (
-                                                depot_item.flags() | Qt.ItemFlag.ItemIsDragEnabled) & ~Qt.ItemFlag.ItemIsDropEnabled
-                                )
-                                depot_item.setIcon(action_icon)
-                                depot_item.setData(key, QtCore.Qt.UserRole)
-
-                                depot_item.setSizeHint(self.tree_view.sizeHint())
-
-                                depot_item.setTextAlignment(
-                                    Qt.AlignLeading | Qt.AlignLeft | Qt.AlignVCenter)
-                                change_item.appendRow(depot_item)
-
-                                if is_published:
-                                    depot_item.setEnabled(False)
-                                else:
-                                    if depot_str not in self.publish_dict:
-                                        self.publish_dict[depot_str] = sg_item
-                            """
-                            if j == 0:
-                                publish_time_txt = self._get_publish_time_info(sg_item)
-                                user_name_txt = self._get_user_name_info(sg_item)
-                                description_txt = self._get_description_info(sg_item)
-
-                                msg = "{} \t {} \t {} \t {}".format(key, publish_time_txt, user_name_txt, description_txt)
-                                change_item.setText(msg)
-                            """
-
-                if parent_icon is not None:
-                    change_item.setIcon(parent_icon)
-
-                if enable_change_item:
-                    change_item.setEnabled(True)
-                else:
-                    change_item.setEnabled(False)
 
     def populate_treeview_widget_pending(self):
         """
@@ -1117,15 +1010,7 @@ class TreeViewWidget(QWidget):
         return publish_list
 
     def get_action_icon(self, action):
-        action_icon = self.p4_file_add_icon
-        if action:
-            if action == "edit":
-                action_icon  = self.p4_file_edit_icon
-            elif action == "delete":
-                action_icon = self.p4_file_delete_icon
-            else:
-                action_icon = self.p4_file_add_icon
-        return action_icon
+        return self._icons.get_icon_pixmap(action) or self._icons.p4_file_add_icon
 
 
     def _get_change_dictionary_submitted(self, data_dict):
@@ -1177,16 +1062,6 @@ class TreeViewWidget(QWidget):
         if not action:
             action = sg_item.get("headAction", None)
         return action
-
-    def _get_depot_path(self, sg_item):
-        """
-        Get depot path
-        """
-        depot_file = sg_item.get("depotFile", None)
-        head_rev = sg_item.get("headRev", None)
-        if head_rev:
-            depot_file = "{}#{}".format(depot_file, head_rev)
-        return depot_file
 
     def _get_change_list_info(self, sg_item):
         """

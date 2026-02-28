@@ -100,7 +100,7 @@ class SgEntityPublishModel(ShotgunModel):
             # we have a selection!
 
 
-           if not show_sub_items:
+            if not show_sub_items:
                 # standard mode - show folders and items for the currently selected item
                 # for leaf nodes and for tree nodes which are connected to an entity,
                 # show matches.

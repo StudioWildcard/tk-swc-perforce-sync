@@ -342,7 +342,7 @@ class LoaderActionManager(ActionManager):
             
             if os.path.isdir(disk_location):
                 # run the app
-                if system == "linux2":
+                if system == "linux":
                     cmd = 'xdg-open "%s"' % disk_location
                 elif system == "darwin":
                     cmd = 'open "%s"' % disk_location

@@ -42,11 +42,9 @@ def create_change(p4, description):
                 new_change = str(new_change_id)
             except ValueError:
                 raise TankError("Perforce: Failed to extract new change id from '%s'" % p4_res)
-    except:
+    except Exception as e:
         msg = "Perforce: %s" % (p4.errors[0] if p4.errors else e)
         log.debug(msg)
-    #except P4Exception as e:
-    #    raise TankError("Perforce: %s" % (p4.errors[0] if p4.errors else e))
 
     if new_change == None:
         raise TankError("Perforce: Failed to create new change!")
@@ -140,31 +138,6 @@ def find_change_containing(p4, path):
     return change
 
 
-def submit_change_original(p4, change):
-    """
-    Submit the specified change
-    """
-    try:
-        change_spec = p4.fetch_change("-o", str(change))
-        submit = p4.run_submit(change_spec)
-        """
-        run_submit returns a list of dicts, something like this:
-        [{'change': '90', 'locked': '2'},
-         "Possible string in here",
-         {'action': 'edit',
-          'depotFile': '//deva/Tool/ScorchedEarth/ToolCategory/ToolTestAsset/deva_ScorchedEarth_ToolTestAsset_concept.psd',
-          'rev': '2'},
-         {'action': 'edit',
-          'depotFile': '//deva/Tool/ScorchedEarth/ToolCategory/ToolTestAsset/deva_ScorchedEarth_ToolTestAsset_concept_alt.psd',
-          'rev': '4'},
-         {'submittedChange': '90'}]
-        """
-        log.debug("Return of run_submit: {}".format(submit))
-        return submit
-    except:
-        msg = "Perforce: %s" % (p4.errors[0] if p4.errors else e)
-        log.debug(msg)
-
 def submit_change(p4, change, filelist):
     """
     Submit the specified change
@@ -211,34 +184,6 @@ def submit_single_file(p4, change, filepath, action):
         msg = "Perforce: %s" % (p4.errors[0] if p4.errors else e)
         log.debug(msg)
 
-
-def submit_and_delete_file_original(p4, change, filepath):
-    """
-    Submit the specified change and then completely delete the file in Perforce.
-    """
-    submit_result, obliterate_result, msg = None, None, None  # Initialize as None
-    try:
-        # Mark files for deletion
-        p4.run('delete', filepath)
-
-        # Fetch the change
-        change_spec = p4.fetch_change("-o", str(change))
-
-        # Submit the change
-        submit_result = p4.run_submit(change_spec)
-        log.debug("Return of run_submit: {}".format(submit_result))
-
-        # Obliterate the files to completely remove them from the depot
-        # Never obliterate files, as it is a destructive operation
-        # obliterate_result = p4.run('obliterate', '-y', filepath)
-        # log.debug("Return of run_obliterate: {}".format(obliterate_result))
-
-    except Exception as e:
-        msg = "Perforce error: %s" % (p4.errors[0] if p4.errors else e)
-        log.debug(msg)
-
-
-    return submit_result, msg
 
 def submit_and_delete_file(p4, change, filepath):
     """

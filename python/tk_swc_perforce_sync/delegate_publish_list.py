@@ -25,7 +25,7 @@ shotgun_view = sgtk.platform.import_framework("tk-framework-qtwidgets", "views")
 from .ui.widget_publish_list import Ui_PublishListWidget
 from .delegate_publish import PublishWidget, PublishDelegate
 from . import model_item_data
-from .utils import Icons, get_action_icon
+from .utils import Icons
 
 logger = sgtk.platform.get_logger(__name__)
 

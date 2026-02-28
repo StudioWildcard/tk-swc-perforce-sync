@@ -50,7 +50,7 @@ from .delegate_publish_history import SgPublishHistoryDelegate
 from .search_widget import SearchWidget
 from .banner import Banner
 from .loader_action_manager import LoaderActionManager
-from .utils import resolve_filters, get_action_icon
+from .utils import resolve_filters, local_to_depot
 from .utils import Icons
 
 from .utils import check_validity_by_path_parts, check_validity_by_published_file
@@ -168,24 +168,6 @@ class AppDialog(QWidget):
             os.path.join(os.path.dirname(__file__), "..", "..")
         )
 
-        #active_refresh_button_image_path = os.path.join(self.repo_root, "icons/refresh_active_20.png")
-        #self.active_refresh_button_icon = QIcon(QPixmap(active_refresh_button_image_path))
-
-        #active_get_latest_image_path = os.path.join(self.repo_root, "icons/get_latest_active_40")
-        #self.active_get_latest_button_icon = QIcon(QPixmap(active_get_latest_image_path))
-
-        #active_submit_button_image_path = os.path.join(self.repo_root, "icons/submit_active_20")
-        #self.active_submit_button_icon = QIcon(QPixmap(active_submit_button_image_path))
-
-        #inactive_refresh_button_image_path = os.path.join(self.repo_root, "icons/refresh_off_20.png")
-        #self.inactive_refresh_button_icon = QIcon(QPixmap(inactive_refresh_button_image_path))
-
-        #inactive_get_latest_image_path = os.path.join(self.repo_root, "icons/get_latest_off_20")
-        #self.inactive_get_latest_button_icon = QIcon(QPixmap(inactive_get_latest_image_path))
-
-        #inactive_submit_button_image_path = os.path.join(self.repo_root, "icons/submit_off_20")
-        #self.inactive_submit_button_icon = QIcon(QPixmap(inactive_submit_button_image_path))
-
         active_column_view_image_path = os.path.join(self.repo_root, "icons/mode_switch_column_active.png")
         self.active_column_view_icon = QIcon(QPixmap(active_column_view_image_path))
 
@@ -202,7 +184,6 @@ class AppDialog(QWidget):
         self.pending_icon = QIcon(QPixmap(pending_image_path))
 
         inactive_pending_image_path = os.path.join(self.repo_root, "icons/pending_off.png")
-        # self.inactive_pending_icon = QIcon(QPixmap(inactive_pending_image_path))
         self.pending_icon_inactive = QIcon(QPixmap(inactive_pending_image_path))
 
         #################################################
@@ -628,54 +609,9 @@ class AppDialog(QWidget):
         #logger.error("This is an ERROR message")
         #################################################
         # Perforce data
-        self.action_dict = {
-            "add": "add",
-            "move/add": "add",
-            "delete": "delete",
-            "edit": "edit"
-        }
-        self.status_dict = {
-            "add": "p4add",
-            "move/add": "p4add",
-            "delete": "p4del",
-            "edit": "p4edit"
-        }
-        self.settings = {
-            "wire": "Alias File",
-            "abc": "Alembic Cache",
-            "max": "3dsmax Scene",
-            "hrox": "NukeStudio Project",
-            "hip": "Houdini Scene",
-            "hipnc": "Houdini Scene",
-            "hiplc": "Houdini Scene",
-            "ma": "Maya Scene",
-            "mb": "Maya Scene",
-            "fbx": "Motion Builder FBX",
-            "nk": "Nuke Script",
-            "psd": "Photoshop Image",
-            "psb": "Photoshop Image",
-            "vpb": "VRED Scene",
-            "vpe": "VRED Scene",
-            "osb": "VRED Scene",
-            "dpx": "Rendered Image",
-            "exr": "Rendered Image",
-            "tiff": "Texture",
-            "tx": "Texture",
-            "tga": "Texture",
-            "dds": "Texture",
-            "jpeg": "Image",
-            "jpg": "Image",
-            "mov": "Movie",
-            "mp4": "Movie",
-            "pdf": "PDF",
-            "png": "Image File",
-            "spp": "PhotoPlus Image",
-            "ztl": "ZBrush Document",
-            "json": "JSON File",
-            "pkl": "Python Pickle",
-            "aep": " Adobe After Effects",
-            "webm": "WebM Format",
-        }
+        self.action_dict = constants.ACTION_MAP
+        self.status_dict = constants.STATUS_MAP
+        self.settings = constants.EXTENSION_TYPE_MAP
         ##########################################################################################
         # Filesystem for cureent user tasks:
         # Create a QTimer with a single-shot connection
@@ -724,72 +660,6 @@ class AppDialog(QWidget):
         # Let children like `sgtk.platform.get_logger(__name__)` inherit this
         sgtk_logger.propagate = True
 
-    def _set_logger_10(self):
-        logger = sgtk.platform.get_logger(__name__)
-        logger.setLevel(logging.DEBUG)
-
-        # Avoid adding duplicate handlers
-        if not any(isinstance(h, ShotGridLogHandler) for h in logger.handlers):
-            sg_log_handler = ShotGridLogHandler(self.ui.log_window)
-            sg_log_handler.setFormatter(logging.Formatter('%(message)s'))
-            logger.addHandler(sg_log_handler)
-
-    def _set_logger_Original(self):
-        # Create custom log handler and add it to the ShotGrid logger
-        sg_log_handler = ShotGridLogHandler(self.ui.log_window)
-        # sg_log_handler.setFormatter(logging.Formatter('%(levelname)s - %(message)s'))
-        sg_log_handler.setFormatter(logging.Formatter('%(message)s'))
-        logger = sgtk.platform.get_logger(__name__)
-        logger.addHandler(sg_log_handler)
-        logger.setLevel(logging.DEBUG)
-
-        sgtk_logger = logging.getLogger("sgtk")
-        sgtk_logger.addHandler(sg_log_handler)
-        sgtk_logger.setLevel(logging.DEBUG)
-
-        # Simulate some log messages
-        #logger.info("Color codes:")
-        #logger.debug("Debug message")
-        #logger.info("Info message")
-        #logger.warning("Warning message")
-        #logger.error("Error message")
-        #logger.critical("Critical message")
-
-    def _set_logger_new(self):
-        # Create custom log handler and add it to the ShotGrid logger
-        sg_log_handler = ShotGridLogHandler(self.ui.log_window)
-        sg_log_handler.setFormatter(logging.Formatter('%(message)s'))
-
-        # Attach the custom handler to all relevant loggers
-        # Root logger
-        root_logger = logging.getLogger()
-        root_logger.addHandler(sg_log_handler)
-        root_logger.setLevel(logging.DEBUG)
-
-        # ShotGrid logger
-        sg_logger = sgtk.platform.get_logger(__name__)
-        sg_logger.addHandler(sg_log_handler)
-        sg_logger.setLevel(logging.DEBUG)
-
-        # Iterate over all existing loggers and attach the handler
-        for logger_name in logging.root.manager.loggerDict:
-            logger = logging.getLogger(logger_name)
-            logger.addHandler(sg_log_handler)
-            logger.setLevel(logging.DEBUG)
-
-        # Optional: Remove other handlers if you want to only show logs in your custom handler
-        for handler in root_logger.handlers[:]:
-            if handler != sg_log_handler:
-                root_logger.removeHandler(handler)
-
-        # Simulate some log messages for testing
-        sg_logger.info("Color codes:")
-        sg_logger.debug("Debug message")
-        sg_logger.info("Info message")
-        sg_logger.warning("Warning message")
-        sg_logger.error("Error message")
-        sg_logger.critical("Critical message")
-
     def add_dropped_files_to_changelist(self, changelist_id, files_data):
         """Adds processed dropped files to the specified changelist data."""
         if changelist_id not in self._change_dict:
@@ -824,53 +694,7 @@ class AppDialog(QWidget):
 
         logger.debug(f"Added {len(files_data)} files to changelist '{changelist_id}' data.")
 
-
-    def _get_shotgun_panel_widget_orig(self):
-        # Get the current engine
-        engine = sgtk.platform.current_engine()
-        if not engine:
-            logger.error("No current engine found. This code must be run within a Toolkit environment.")
-        else:
-            #logger.debug("Current engine name: {}".format(engine.name))
-
-            # Retrieve the desired app, e.g., the Shotgun Panel app
-            shotgun_panel_app = engine.apps.get("tk-multi-shotgunpanel")
-
-            if shotgun_panel_app:
-                #logger.debug("Shotgun Panel app is loaded.")
-                try:
-                    # Use create_widget_for_P4SG() to get the panel widget without creating a new window.
-                    if not self.shotgun_panel_widget:
-                        self.shotgun_panel_widget = shotgun_panel_app.create_widget_for_P4SG(self.ui.panel_details)
-
-                    if self.shotgun_panel_widget:
-                        # logger.debug(">>>>> entity_data {}".format(self._entity_data))
-                        if self._entity_data:
-                            self._entity_path, entity_id, entity_type = self._get_entity_info(self._entity_data)
-                            if entity_id and entity_type:
-                                logger.debug("Navigate to entity ID # {}".format(entity_id))
-                                self.shotgun_panel_widget.navigate_to_entity(entity_type, entity_id)
-
-                        # Clear any existing widgets in the layout
-                        while self.ui.panel_layout.count():
-                            child = self.ui.panel_layout.takeAt(0)
-                            if child.widget():
-                                child.widget().setParent(None)  # Remove the widget from the layout without deleting it
-
-                        # Add the panel widget to the layout
-                        self.ui.panel_layout.addWidget(self.shotgun_panel_widget)
-                        #logger.info("Shotgun panel widget added to the layout.")
-
-                    else:
-                        logger.error("Failed to retrieve the panel widget.")
-                except Exception as e:
-                    logger.error("Failed to create or add the Shotgun panel widget: {}".format(e))
-            else:
-                logger.warning("Shotgun Panel app is not loaded. Please check configuration.")
-
-
-
-    def _get_shotgun_panel_widget(self, target_entity=None):  # NEW Signature
+    def _get_shotgun_panel_widget(self, target_entity=None):
         """
         Retrieves or creates the Shotgun Panel widget and navigates it
         to the specified target entity.
@@ -891,7 +715,7 @@ class AppDialog(QWidget):
                 # Get or create the widget
                 if not self.shotgun_panel_widget:
                     # Pass the parent widget (self.ui.panel_details)
-                    self.shotgun_panel_widget = shotgun_panel_app.create_widget_for_P4SG(self.ui.panel_details)
+                    self.shotgun_panel_widget = shotgun_panel_app.create_widget(self.ui.panel_details)
 
                 if self.shotgun_panel_widget:
                     # --- Navigation Logic ---
@@ -1191,15 +1015,10 @@ class AppDialog(QWidget):
                             sg_item['p4_user'] = default_changelist.get('User', None)
                             sg_item['client'] = default_changelist.get('client', None)
                             sg_item['time'] = default_changelist.get('time', None)
-                            # sg_item['change'] = default_changelist.get('Change', None)
-                            # sg_item['status'] = default_changelist.get("Status", None)
-                            # sg_item['Published'] = False
-
                             file_path = sg_item.get("clientFile", None)
                             if file_path:
                                 sg_item["path"] = {}
                                 sg_item["path"]["local_path"] = file_path
-                            #    sg_item["name"] = os.path.basename(file_path)
                             have_rev = sg_item.get('haveRev', "0")
                             head_rev = sg_item.get('headRev', "0")
                             if not have_rev or have_rev == "none":
@@ -1207,18 +1026,9 @@ class AppDialog(QWidget):
                             sg_item["revision"] = "#{}/{}".format(have_rev, head_rev)
                             sg_item["action"] = sg_item.get("action", None) or sg_item.get("headAction", None)
 
-                            #  sg_item["code"] = "{}#{}".format(sg_item.get("name", None), head_rev)
                             p4_status = self._get_action(sg_item)
-                            #sg_item["sg_status_list"] = self._get_p4_status(p4_status)
-
-                            #sg_item["depot_file_type"] = self._get_publish_type(file_path)
 
                             self._change_dict[key].append(sg_item)
-
-
-
-
-            # logger.debug("key {}:{}".format(key, self._change_dict[key]))
 
     def get_client_name(self):
         max_retries = 5
@@ -1654,16 +1464,6 @@ class AppDialog(QWidget):
             action = sg_item.get("headAction", None)
         return action
 
-    def _get_depot_path(self, sg_item):
-        """
-        Get depot path
-        """
-        depot_file = sg_item.get("depotFile", None)
-        head_rev = sg_item.get("headRev", None)
-        if head_rev:
-            depot_file = "{}#{}".format(depot_file, head_rev)
-        return depot_file
-
     def _on_file_history_selection(self, selected, deselected):
         """
         Called when the selection changes in the file_history view in the details panel
@@ -1783,20 +1583,14 @@ class AppDialog(QWidget):
 
             self.ui.publish_view.setViewMode(QListView.ListMode)
             self.ui.publish_view.setItemDelegate(self._publish_list_delegate)
-            #self._show_thumb_scale(False)
             self.main_view_mode = self.MAIN_VIEW_LIST
             self.ui.sync_files.setEnabled(True)
             self.ui.sync_parents.setEnabled(True)
             self.ui.fix_selected.setEnabled(False)
             self.ui.fix_all.setEnabled(False)
             self.ui.submit_files.setEnabled(False)
-            #self.ui.refresh_button.setIcon(self.active_refresh_button_icon)
-            # self.ui.get_latest_button.setIcon(self.active_get_latest_button_icon)
-            #self.ui.submit_button.setIcon(self.inactive_submit_button_icon)
             self.ui.get_latest_button.setEnabled(True)
-
             self.ui.submit_button.setEnabled(False)
-
 
         elif mode == self.MAIN_VIEW_THUMB:
             self._turn_all_modes_off()
@@ -1819,17 +1613,12 @@ class AppDialog(QWidget):
             self.ui.fix_selected.setEnabled(False)
             self.ui.fix_all.setEnabled(False)
             self.ui.submit_files.setEnabled(False)
-            #self.ui.refresh_button.setIcon(self.active_refresh_button_icon)
-            # self.ui.get_latest_button.setIcon(self.active_get_latest_button_icon)
-            self.ui.get_latest_button.setEnabled(True)
-            #self.ui.submit_button.setIcon(self.inactive_submit_button_icon)
             self.ui.get_latest_button.setEnabled(True)
             self.ui.submit_button.setEnabled(False)
 
         elif mode == self.MAIN_VIEW_COLUMN:
             self._turn_all_modes_off()
             self.ui.column_view.setVisible(True)
-            #self.ui.perforce_scroll.setVisible(True)
             self.ui.column_mode.setIcon(self.active_column_view_icon)
 
             self.ui.column_mode.setChecked(True)
@@ -1843,11 +1632,6 @@ class AppDialog(QWidget):
             self.ui.fix_all.setEnabled(False)
             self.ui.submit_files.setEnabled(False)
 
-            #self.ui.refresh_button.setIcon(self.active_refresh_button_icon)
-            # self.ui.get_latest_button.setIcon(self.active_get_latest_button_icon)
-            self.ui.get_latest_button.setEnabled(True)
-            self.ui.get_latest_button.setEnabled(True)
-            #self.ui.submit_button.setIcon(self.inactive_submit_button_icon)
             self.ui.get_latest_button.setEnabled(True)
             self.ui.submit_button.setEnabled(False)
 
@@ -1855,9 +1639,6 @@ class AppDialog(QWidget):
             self._turn_all_modes_off()
             self.ui.submitted_scroll.setVisible(True)
 
-            #self.ui.submitted_mode.setIcon(
-            #    QIcon(QPixmap(":/res/mode_switch_card_active.png"))
-            #)
             self.ui.submitted_mode.setIcon(self.submitted_icon)
             self.ui.submitted_mode.setChecked(True)
 
@@ -1868,10 +1649,6 @@ class AppDialog(QWidget):
             self.ui.fix_selected.setEnabled(True)
             self.ui.fix_all.setEnabled(True)
             self.ui.submit_files.setEnabled(False)
-            #self.ui.refresh_button.setIcon(self.active_refresh_button_icon)
-            # self.ui.get_latest_button.setIcon(self.inactive_get_latest_button_icon)
-            self.ui.get_latest_button.setEnabled(False)
-            #self.ui.submit_button.setIcon(self.inactive_submit_button_icon)
             self.ui.get_latest_button.setEnabled(False)
             self.ui.submit_button.setEnabled(False)
 
@@ -1882,10 +1659,6 @@ class AppDialog(QWidget):
             self.ui.fix_selected.setEnabled(False)
             self.ui.fix_all.setEnabled(False)
             self.ui.submit_files.setEnabled(True)
-            #self.ui.refresh_button.setIcon(self.active_refresh_button_icon)
-            #self.ui.get_latest_button.setIcon(self.inactive_get_latest_button_icon)
-            self.ui.get_latest_button.setEnabled(False)
-            #self.ui.submit_button.setIcon(self.active_submit_button_icon)
             self.ui.get_latest_button.setEnabled(False)
             self.ui.submit_button.setEnabled(True)
         else:
@@ -2172,205 +1945,6 @@ class AppDialog(QWidget):
     def _submit_pending(self):
         logger.debug("Submitting pending...")
         self._on_submit_files()
-
-    def _on_sync_current_2(self):
-        """
-        Finds the currently selected entity, determines its Perforce depot path,
-        and syncs the files within that path that need updating.
-        """
-        logger.info("Starting sync for the current selection...")
-        # logger.info(f"Entity data {self._entity_data}")
-        # logger.info(f"Entity path {self._entity_path}")
-
-        entity_path, entity_id, entity_type = self._get_selected_entity_path_info()
-        logger.info(f"Selected Entity path {entity_path}")
-        # logger.info(f">> Selected Entity id: {entity_id}")
-        # logger.info(f">> Selected type id: {entity_type}")
-
-        if not entity_path:
-            logger.warning("No valid path found for the selected entity.")
-            self._add_log(
-                "\n <span style='color:#FFD700'>No valid path found for the selected entity.</span> \n", 2)
-            return
-
-        # Convert local path to Perforce depot path
-        depot_path_base = self._convert_local_to_depot(entity_path)
-        if not depot_path_base:
-            logger.error(f"Could not convert local path '{entity_path}' to a Perforce depot path.")
-            self._add_log(
-                f"\n <span style='color:#CC3333'>Error: Could not map '{entity_path}' to a Perforce path.</span> \n", 2)
-            return
-
-        # Build Perforce wildcard path
-        depot_path_wildcard = depot_path_base.rstrip('/') + '/...'
-        logger.info(f"[SYNC CHECK] Running dry-run sync on: {depot_path_wildcard}")
-        # Dry-run to get file count
-        sync_output = self._p4.run_sync("-n", depot_path_wildcard)
-        depot_files = [entry.get("depotFile") for entry in sync_output if "depotFile" in entry]
-        num_files = len(depot_files)
-
-        logger.info(f"Total files to sync: {num_files}")
-        self._add_log(f"\n <span style='color:#2C93E2'>Found {num_files} files that need syncing.</span> \n", 2)
-
-        if depot_files:
-            logger.info("Files to sync:")
-            for i, path in enumerate(depot_files, 1):
-                logger.info(f"[{i:02}] {path}")
-            sys.stdout.flush()
-            sys.stderr.flush()
-        else:
-            logger.info("No individual depot files found in sync output.")
-
-        progress_state = {"count": 0}
-
-        def sync_thread_fn():
-            try:
-                # Run the actual Perforce sync using subprocess to get real-time output
-                process = subprocess.Popen(
-                    ["p4", "sync", depot_path_wildcard],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1
-                )
-
-                file_re = re.compile(r"^([^#\s]+)#\d+ - .*")  # Matches depot file path
-
-                for line in process.stdout:
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    logger.info(f"[p4] {line}")
-
-                    match = file_re.match(line)
-                    if match:
-                        progress_state["count"] += 1
-                        file_path = match.group(1)
-                        msg = f"({progress_state['count']}/{num_files}) Syncing: {file_path}"
-                        self._add_log(msg, 3)
-
-                        progress = ((progress_state["count"]) / max(num_files, 1)) * 100
-                        self._update_progress(progress)
-                        QCoreApplication.processEvents()
-
-                process.stdout.close()
-                process.wait()
-
-            except Exception as e:
-                # logger.error(f"Sync failed: {e}")
-                self._add_log(
-                    f"\n <span style='color:#CC3333'>Sync failed: {e}</span> \n", 2)
-
-        # Launch thread to run sync
-        sync_thread = threading.Thread(target=sync_thread_fn)
-        sync_thread.start()
-
-        self._add_log("\n <span style='color:#2C93E2'>Syncing files...</span> \n", 2)
-
-        # Keep UI responsive while syncing
-        while sync_thread.is_alive():
-            QCoreApplication.processEvents()
-            time.sleep(0.1)
-
-        self._add_log(
-            "\n <span style='color:#2C93E2'>Sync complete for current selection.</span> \n", 2)
-
-        self._add_log("\n <span style='color:#2C93E2'>Reloading data...</span> \n", 2)
-        self.refresh_publish_data()
-        self.refresh_entity_preset_tabs()
-        self._add_log("\n <span style='color:#2C93E2'>Reloading data is complete.</span> \n", 2)
-
-    def _on_sync_current_original(self):
-        """
-        Finds the currently selected entity, determines its Perforce depot path,
-        and syncs the files within that path that need updating.
-        """
-        logger.info("Starting sync for the current selection...")
-        # logger.info(f"Entity data {self._entity_data}")
-        # logger.info(f"Entity path {self._entity_path}")
-
-        entity_path, entity_id, entity_type = self._get_selected_entity_path_info()
-        logger.info(f"Selected Entity path {entity_path}")
-        # logger.info(f">> Selected Entity id: {entity_id}")
-        # logger.info(f">> Selected type id: {entity_type}")
-
-        if not entity_path:
-            logger.warning("No valid path found for the selected entity.")
-            self._add_log(
-                "\n <span style='color:#FFD700'>No valid path found for the selected entity.</span> \n", 2)
-            return
-
-        # Convert local path to Perforce depot path
-        depot_path_base = self._convert_local_to_depot(entity_path)
-        if not depot_path_base:
-            logger.error(f"Could not convert local path '{entity_path}' to a Perforce depot path.")
-            self._add_log(
-                f"\n <span style='color:#CC3333'>Error: Could not map '{entity_path}' to a Perforce path.</span> \n", 2)
-            return
-
-        # Build Perforce wildcard path
-        depot_path_wildcard = depot_path_base.rstrip('/') + '/...'
-        logger.info(f"[SYNC CHECK] Running dry-run sync on: {depot_path_wildcard}")
-
-        # Run dry-run sync to list files
-        sync_output = self._p4.run_sync("-n", depot_path_wildcard)
-        depot_files = [entry.get("depotFile") for entry in sync_output if "depotFile" in entry]
-        num_files = len(depot_files)
-
-        logger.info(f"Total files to sync: {num_files}")
-        self._add_log(f"\n <span style='color:#2C93E2'>Found {num_files} files that need syncing.</span> \n", 2)
-
-        if depot_files:
-            logger.info("Files to sync:")
-            for i, path in enumerate(depot_files, 1):
-                msg = f"[{i:02}] {path}"
-                self._add_log(msg, 3)
-                # logger.info(f"[{i:02}] {path}")
-            sys.stdout.flush()
-            sys.stderr.flush()
-        else:
-            logger.info("No individual depot files found in sync output.")
-
-        # Define sync logic in thread
-        def sync_thread_fn():
-            try:
-                self._p4.run_sync(depot_path_wildcard)
-            except Exception as e:
-                logger.error(f"Sync failed: {e}")
-                self._add_log(
-                    f"\n <span style='color:#CC3333'>Sync failed: {e}</span> \n", 2)
-
-        sync_thread = threading.Thread(target=sync_thread_fn)
-        sync_thread.start()
-
-        # Simulate progress bar
-        if num_files > 0:
-            for i in range(num_files):
-                msg = f"({i + 1}/{num_files}) Syncing..."
-                self._add_log(msg, 3)
-                progress = ((i + 1) / num_files) * 100
-                self._update_progress(progress)
-                QCoreApplication.processEvents()
-                time.sleep(0.15)
-        else:
-            self._update_progress(100)
-
-        self._add_log("\n <span style='color:#2C93E2'>Finalizing file syncing, please wait...</span> \n", 2)
-
-        # Wait for sync thread to finish
-        while sync_thread.is_alive():
-            QCoreApplication.processEvents()
-
-        self._after_syncing_operations()
-
-        #self._add_log(
-        #    "\n <span style='color:#2C93E2'>Sync complete for current selection.</span> \n", 2)
-
-        #self._add_log("\n <span style='color:#2C93E2'>Reloading data...</span> \n", 2)
-        #self.refresh_publish_data()
-        # self.refresh_entity_preset_tabs()
-        #self._add_log("\n <span style='color:#2C93E2'>Reloading data is complete.</span> \n", 2)
 
     def _on_sync_current(self):
         """
@@ -2665,91 +2239,6 @@ class AppDialog(QWidget):
 
         logger.info(f"Selected entity path: {entity_path}, ID: {entity_id}, Type: {entity_type}")
         return entity_path, entity_id, entity_type
-    def _get_selected_entity_path_info_old(self):
-        """
-        Finds the currently selected entity in the active preset tab,
-        determines its filesystem path, and returns relevant info.
-
-        :returns: Tuple (entity_path, entity_id, entity_type) or (None, None, None) if not found.
-        """
-        logger.debug("Getting path info for selected entity...")
-
-        selected_item = self._get_selected_entity()
-        if not selected_item:
-            logger.warning("No entity selected in the tree view.")
-            self._add_log(
-                "\n <span style='color:#FFD700'>No entity selected. Please select an item in the left panel.</span> \n",
-                2)
-            return None, None, None
-
-        # Extract the entity data from the selected item
-        sg_data, entity_data = model_item_data.get_item_data(selected_item)
-        if not entity_data:
-            logger.warning("Could not retrieve entity data for the selected item.")
-            self._add_log(
-                "\n <span style='color:#FFD700'>Could not get data for the selected item.</span> \n", 2)
-            return None, None, None
-
-        if isinstance(entity_data, dict):
-            # Use full entity info if available (e.g., for 'My Tasks' tab)
-            entity_path, entity_id, entity_type = self._get_entity_info(entity_data)
-        else:
-            logger.warning("Entity data is not a dictionary. Falling back to basic sync resolution.")
-            self._add_log(
-                "\n <span style='color:#FFD700'>Warning: Entity data format unexpected. Attempting fallback method.</span> \n",
-                2)
-            # Fall back to simple method (more compatible with other tabs)
-            entity_path, entity_id, entity_type = self._get_entity_for_sync(sg_data)
-
-        if not entity_path:
-            logger.warning(
-                f"Could not determine the filesystem path for the selected entity: {entity_type} {entity_id}")
-            self._add_log(
-                f"\n <span style='color:#FFD700'>Could not find the filesystem path for the selected {entity_type or 'entity'}.</span> \n",
-                2)
-            return None, None, None
-
-        logger.info(f"Selected entity path: {entity_path}, ID: {entity_id}, Type: {entity_type}")
-        return entity_path, entity_id, entity_type
-
-
-    def _get_selected_entity_path_info_original(self):
-        """
-        Finds the currently selected entity in the active preset tab,
-        determines its filesystem path, and returns relevant info.
-
-        :returns: Tuple (entity_path, entity_id, entity_type) or (None, None, None) if not found.
-        """
-        logger.debug("Getting path info for selected entity...")
-
-        selected_item = self._get_selected_entity()
-        if not selected_item:
-            logger.warning("No entity selected in the tree view.")
-            self._add_log(
-                "\n <span style='color:#FFD700'>No entity selected. Please select an item in the left panel.</span> \n",
-                2)
-            return None, None, None
-
-        # Extract the entity data from the selected item
-        (sg_data, entity_data) = model_item_data.get_item_data(selected_item)
-        if not entity_data:
-            logger.warning("Could not retrieve entity data for the selected item.")
-            self._add_log("\n <span style='color:#FFD700'>Could not get data for the selected item.</span> \n", 2)
-            return None, None, None
-
-        # Get the local filesystem path for the entity
-        # Using _get_entity_info as it handles Tasks correctly
-        entity_path, entity_id, entity_type = self._get_entity_info(entity_data)
-        if not entity_path:
-            logger.warning(
-                f"Could not determine the filesystem path for the selected entity: {entity_data.get('type', 'N/A')} {entity_data.get('id', 'N/A')}")
-            self._add_log(
-                f"\n <span style='color:#FFD700'>Could not find the filesystem path for the selected {entity_data.get('type', 'N/A')}.</span> \n",
-                2)
-            return None, None, None
-
-        logger.info(f"Selected entity path: {entity_path}, ID: {entity_id}, Type: {entity_type}")
-        return entity_path, entity_id, entity_type
 
     def _get_preset_entity_path(self):
         """
@@ -2912,12 +2401,6 @@ class AppDialog(QWidget):
         # Determine if the index is a parent or a child
         is_parent = not index.parent().isValid()
 
-        # Set selection mode based on whether the item is a parent or a child
-        # if is_parent:
-        #    self._pending_view_widget.single_selection()
-        # else:
-        #    self._pending_view_widget.multi_selection()
-
         # Build a menu with all the actions.
         menu = QMenu(self)
 
@@ -3014,61 +2497,12 @@ class AppDialog(QWidget):
                 except:
                     pass
                 logger.debug("change is: {}".format(change))
-                """
                 engine = sgtk.platform.current_engine()
                 if engine:
-                    logger.debug("Running the publish command...")
-                    logger.debug("Current engine: {}".format(engine))
-
-                    # Get all available commands in the engine
-                    logger.debug("Available commands: {}".format(engine.commands.keys()))
-
                     app_command = engine.commands.get("Publish...")
-
                     if app_command:
-                        logger.debug("Found 'Publish...' command.")
-                        logger.debug("Command details: {}".format(app_command))
-
-                        # Log the callback function before calling it
-                        callback_func = app_command.get("callback")
-                        logger.debug("Callback function: {}".format(callback_func))
-
-                        if callback_func:
-                            logger.debug(">>>>> Pass in the desired changelist parameter: {}".format(change))
-                            callback_func(change)
-                        else:
-                            logger.warning("No callback function found in 'Publish...' command.")
-                    else:
-                        logger.warning("'Publish...' command not found in engine.commands.")
-                """
-                engine = sgtk.platform.current_engine()
-                if engine:
-                    logger.debug("Running the publish command...")
-                    app_command = engine.commands.get("Publish...")
-                    # logger.debug("Completed running the publish command")
-
-                    if app_command:
-                        # now run the command, which in this case will launch the Publish app,
-                        # passing in the desired changelist parameter.
-                        # app_command["callback"](change)
-                        logger.debug(">>>>> Pass in the desired changelist parameter: {}".format(change))
+                        logger.debug("Pass in the desired changelist parameter: {}".format(change))
                         app_command["callback"](change)
-
-                        # Start the after_publish_ui_close method in a new thread
-                        # threading.Thread(target=self._after_publish_ui_close).start()
-
-                        # After the UI closes, call _populate_pending_widget
-                        # wait_thread = threading.Thread(target=self._after_publish_ui_close)
-                        # wait_thread.start()
-
-                        # Start a new thread to wait for the UI to close
-                        #wait_thread = threading.Thread(target=self._wait_for_ui_close)
-                        #wait_thread.start()
-
-                        #wait_thread = UIWaitThread(self._check_ui_closed, self)
-                        # wait_thread.start()
-
-
 
             except Exception as e:
                 logger.debug("Error loading publisher: {}".format(e))
@@ -3383,167 +2817,6 @@ class AppDialog(QWidget):
             return changelist, description
         return None
 
-    def _populate_column_view_widget_2(self):
-        """
-        Populates the column view using self._sg_data merged with self._fstat_dict.
-        """
-        self._column_view_dict = {}
-        self._standard_item_dict = {}
-
-        logger.debug("Setting up Column View table ...")
-        self._setup_column_view() # Resets the model
-
-        # Use self._sg_data as the primary source, augmented by self._fstat_dict
-        logger.debug("Preparing data for Column View...")
-        combined_sg_data = []
-        processed_keys = set() # Keep track of fstat keys processed via sg_data merge
-        """
-        logger.info("_populate_column_view_widget self._sg_data".format(self._sg_data))
-        for sg_item in self._sg_data:
-            logger.info("sg_item: {}".format(sg_item))
-            #logger.info("--------------------------------------")
-            #path = sg_item.get("path", {})
-            #logger.info("local_path: {}".format(path.get("local_path", None)))
-            #logger.info("headRev: {}".format(sg_item.get("headRev", None)))
-            #logger.info("haveRev: {}".format(sg_item.get("haveRev", None)))
-        logger.info("_populate_column_view_widget self._fstat_dict")
-        for key, val  in self._fstat_dict.items():
-            logger.info("key: {} val : {}".format(key, val))
-        """
-        # 1. Process data from self._sg_data (ShotGrid publishes)
-        if self._sg_data:
-            for sg_item in self._sg_data:
-                if not sg_item: continue
-                local_path = sg_item.get("path", {}).get("local_path")
-                key = None # Key to match with _fstat_dict
-                if local_path:
-                    # Create a key consistent with _fstat_dict (path + #rev)
-                    base_key = self._create_key(local_path) # Creates lowercased, no-slash key
-                    # Try to get revision from SG data, fallback to fstat if needed later
-                    version_number = sg_item.get("version_number")
-                    head_rev_sg = sg_item.get("headRev") # Might be added by _get_perforce_data previously
-
-                    if version_number is not None:
-                        key = f"{base_key}#{int(version_number)}"
-                    elif head_rev_sg: # Use headRev from SG item if version_number missing
-                         key = f"{base_key}#{head_rev_sg}"
-                    # else: key remains None, will try to match fstat later if possible
-
-                # Merge with fstat data if a key was determined
-                fstat_data = self._fstat_dict.get(key, {}) if key else {}
-                # Prioritize ShotGrid fields over fstat fields where they overlap
-                merged_item = {**fstat_data, **sg_item}
-
-
-                if "revision" in fstat_data:
-                    merged_item["revision"] = fstat_data["revision"]
-
-                # Ensure essential fields for column view are present
-                merged_item.setdefault("Published", True) # Assume published if from SG data
-
-                # Try to determine a reliable unique key for the dictionaries
-                item_id = merged_item.get("id")
-                item_key = item_id if item_id else key # Use SG id if available, else fstat key
-
-                if item_key: # Only add if we have a reasonable key
-                    combined_sg_data.append(merged_item)
-                    if key: # Mark the fstat key as processed if we used it
-                        processed_keys.add(key)
-                # else: logger.warning(f"Could not determine key for SG item: {sg_item.get('code')}")
-
-        """
-        # 2. Process data *only* in self._fstat_dict (Perforce files not in SG data)
-        for key, fstat_item in self._fstat_dict.items():
-            if key not in processed_keys:
-                # This item exists in Perforce but wasn't in the SG query result
-                # Ensure it has necessary fields for the column view
-                if not fstat_item.get("Published"): # Only add if not marked as published
-                    # Add necessary defaults if missing from fstat
-                    file_path = fstat_item.get("clientFile")
-                    if file_path:
-                        fstat_item.setdefault("name", os.path.basename(file_path))
-                        fstat_item.setdefault("path", {"local_path": file_path})
-                        # 'revision' is already set in _get_perforce_data
-                        # 'code' is already set in _fix_fstat_dict
-                        fstat_item.setdefault("type", "PublishedFile") # Assume this type?
-                        # 'sg_status_list' is already set in _fix_fstat_dict
-                        # 'depot_file_type' is already set in _fix_fstat_dict
-                        fstat_item.setdefault("action", fstat_item.get("headAction"))
-
-                        # Use the fstat key as the primary key for the dictionaries
-                        item_key = key
-                        combined_sg_data.append(fstat_item)
-                    # else: logger.warning(f"fstat item {key} missing clientFile")
-
-
-        """
-        length = len(combined_sg_data)
-        # logger.debug(f"Combined data length: {length}")
-        # logger.debug(f"Sample combined data item: {combined_sg_data[0] if combined_sg_data else 'None'}")
-
-        if combined_sg_data and length > 0:
-            msg = "\n <span style='color:#2C93E2'>Populating the Column View with {} files. Please wait...</span> \n".format(
-                length)
-            self._add_log(msg, 2)
-
-            # --- (Optional) Get Perforce file size ---
-            # This might be redundant if fstat already has size. Verify if needed.
-            # logger.debug("Getting Perforce file size...")
-            # combined_sg_data = self._get_perforce_size(combined_sg_data) # Pass combined data
-
-            # logger.debug("Populating Column View table...")
-
-            # --- Iterate over combined_sg_data ---
-            for sg_item in combined_sg_data:
-                # Determine the key (prefer SG ID, fallback to fstat key)
-                logger.debug(f">>>>>------------------------------------------------------------")
-                logger.debug(f">>>>>  sg_item data is")
-                for k, v in sg_item.items():
-                    logger.debug(f">>>>>  {k}: {v}")
-
-                item_id = sg_item.get("id")
-                item_key = item_id # Default to SG ID
-
-                if not item_key: # Fallback if no SG ID
-                    local_path = sg_item.get("path", {}).get("local_path")
-                    head_rev = sg_item.get("headRev", "0")
-                    if local_path:
-                         base_key = self._create_key(local_path)
-                         item_key = f"{base_key}#{head_rev}" # Use fstat-style key
-                    else:
-                         # Fallback key if path is also missing (less ideal)
-                         item_key = f"item_{sg_item.get('depotFile', 'unknown')}_{head_rev}"
-
-                # logger.debug(f"Processing item with key: {item_key}")
-
-                # --- Pass sg_item directly to _get_column_data ---
-                new_sg_item, sg_list = self._get_column_data(sg_item)
-
-                # logger.debug(">>> original sg_item: {}".format(sg_item))
-                # logger.debug(">>> new sg_item: {}".format(new_sg_item))
-
-                # --- Use item_key ---
-                if item_key not in self._column_view_dict and new_sg_item:
-                    self._column_view_dict[item_key] = new_sg_item
-                # logger.debug(">>> sg_list: {}".format(sg_list))
-                if sg_list:
-                    # --- Use item_key ---
-                    self._standard_item_dict[item_key] = sg_list
-
-            #logger.debug(">>> self._column_view_dict: {}".format(self._column_view_dict))
-            #logger.debug(">>> self._standard_item_dict: {}".format(self._standard_item_dict))
-
-            self._get_grouped_column_view_data() # Uses the dicts populated above
-            self._get_publish_icons() # Attempt to get icons based on current data
-            self._set_column_group() # Populates the view model
-            logger.debug("Column View population complete.")
-
-        else:
-             msg = "\n <span style='color:#FFD700'>No files found to display in Column View for the current selection.</span> \n"
-             self._add_log(msg, 2)
-             # Ensure the view is cleared if no data
-             self.column_view_model.setRowCount(0) # Clear the view model directly
-
     def _populate_column_view_widget(self):
         #self._publish_model.hard_refresh()
         self._column_view_dict = {}
@@ -3778,11 +3051,6 @@ class AppDialog(QWidget):
             """
         return pipeline_step
 
-    def _get_modified_date_original(self, dt):
-
-        publish_time = create_modified_date(dt)
-        return publish_time
-
     def _get_modified_date(self, dt):
         """
         Converts a timestamp (float) to a datetime object before passing
@@ -3816,31 +3084,6 @@ class AppDialog(QWidget):
                 "%Y-%m-%d %H:%M"
             )
 
-        return publish_time
-
-    def _get_publish_time_for_column_view_old(self, sg_item):
-        publish_time = "N/A"
-        version_numer = int(sg_item.get("version_number", 0))
-        if version_numer == 0:
-            # No prior publish, use Perforce creation time as publish time
-            dt = sg_item.get("headModTime") or self.sg_item.get("headTime") or None
-            # logger.debug(">>>>> dt is: {}".format(dt))
-            # if dt:
-            #    publish_time = create_human_readable_timestamp(dt)
-        else:
-
-            dt = sg_item.get("created_at") or 0
-            # publish_time = create_human_readable_timestamp(dt)
-            """
-            if dt > 0:
-                publish_time = datetime.datetime.fromtimestamp(dt).strftime(
-                    "%Y-%m-%d %H:%M"
-                )
-            else:
-                publish_time = "N/A"
-            """
-        publish_time = dt
-        # logger.debug(">>>>> Publish time is: {}".format(publish_time))
         return publish_time
 
     def _get_entity_path(self, entity_data):
@@ -4821,33 +4064,6 @@ class AppDialog(QWidget):
 
         logger.debug(f"Collected {len(self._publish_icons)} icons.")
 
-    def _get_publish_icons_original(self):
-        """
-        Get the icons for the publish view.
-        """
-        total_file_count = 0
-        self._publish_icons = {}
-
-        model = self.ui.publish_view.model()
-        for row in range(model.rowCount()):
-            model_index = model.index(row, 0)
-            proxy_model = model_index.model()
-            source_index = proxy_model.mapToSource(model_index)
-            # now we have arrived at our model derived from StandardItemModel
-            # so let's retrieve the standarditem object associated with the index
-            item = source_index.model().itemFromIndex(source_index)
-
-            is_folder = item.data(SgLatestPublishModel.IS_FOLDER_ROLE)
-            if not is_folder:
-                # Run default action.
-                total_file_count += 1
-                sg_item = shotgun_model.get_sg_data(model_index)
-                id = sg_item.get("id", None)
-                icon = item.icon()
-                if id and icon:
-                    id = int(id)
-                    self._publish_icons[id] = icon
-
     def _setup_column_details_panel(self, id):
         """
         Sets up the file details panel with info for a given column view row.
@@ -4924,29 +4140,10 @@ class AppDialog(QWidget):
                     return
 
                 __set_publish_ui_visibility(True)
-                """
-                import urllib.request
-
-                image_data = sg_item.get('image', None)
-                
-                if image_data:
-                    # Define the local path to save the image
-                    local_image_path = "/temp/path_to_save_local_image.png"  # Replace with the desired local path
-
-                    # Save the downloaded image data to the local file
-                    with open(local_image_path, "wb") as local_image_file:
-                        local_image_file.write(image_data)
-
-                self.ui.file_details_image.setPixmap(QPixmap(local_image_path))
-                """
 
                 if self._publish_icons and id in self._publish_icons:
                     thumb_pixmap = self._publish_icons[id].pixmap(512)
                     self.ui.file_details_image.setPixmap(thumb_pixmap)
-
-                # thumb_pixmap = item.icon().pixmap(512)
-                # self.ui.file_details_image.setPixmap(thumb_pixmap)
-
 
                 # sort out the actions button
                 actions = self._action_manager.get_actions_for_publish(
@@ -5262,21 +4459,6 @@ class AppDialog(QWidget):
             if entity_asset_type:
                 msg += __make_table_row("Asset Type", "%s" % entity_asset_type)
 
-            # self.ui.entity_details_header.setText("<table>%s</table>" % msg)
-            """
-            # sort out the actions button
-            actions = self._action_manager.get_actions_for_publish(
-                entity_data, self._action_manager.UI_AREA_DETAILS
-            )
-            if len(actions) == 0:
-                self.ui.entity_detail_actions_btn.setVisible(False)
-            else:
-                self.ui.entity_detail_actions_btn.setVisible(True)
-                self._entity_details_action_menu.clear()
-                for a in actions:
-                    self._dynamic_widgets.append(a)
-                    self._entity_details_action_menu.addAction(a)
-            """
     def _request_thumbnail_download(self, item, field, url, entity_type, entity_id):
         """
         Request that a thumbnail is downloaded for an item. If a thumbnail is successfully
@@ -5334,39 +4516,6 @@ class AppDialog(QWidget):
 
         # populate the thumbnail
         self._populate_thumbnail(item, field, thumb_path)
-
-    def _get_entity_parents_new(self, entity_data):
-        """
-        Get the entity parents for a given item.
-        :param entity_data:
-        :return:
-        """
-        self.entity_parents = []
-        if entity_data:
-            entity_id = entity_data.get("id", None)
-            entity_type = entity_data.get("type", None)
-
-            if entity_id and entity_type:
-                filters = [["id", "is", entity_id]]
-                fields = ["id", "code", "type", "parents"]
-
-                # Get the entity
-                published_entities = self._app.shotgun.find(entity_type, filters, fields)
-
-                #logger.debug(">>>>>>>>>>> Published entity: %s" % published_entities)
-                for published_entity in published_entities:
-                    # Get the parents
-                    linked_assets = published_entity.get("parents", None)
-                    if linked_assets:
-                        for parent in linked_assets:
-                            self.entity_parents.append(parent)
-
-                #logger.debug(">>>>>>>>>>> Parents: %s" % self.entity_parents)
-                for entity_parent in self.entity_parents:
-                    entity_path, entity_id, entity_type = self._get_entity_info(entity_parent)
-                    entity_parent["entity_path"] = entity_path
-
-                #logger.debug(">>>>>>>>>>> Parents with paths: %s" % self.entity_parents)
 
     def _get_entity_parents(self, entity_data):
         """
@@ -5652,19 +4801,17 @@ class AppDialog(QWidget):
                     if not head_rev and not have_rev:
                         # fstat_list = self._p4.run_fstat(local_path + '/...')
                         fstat_list = self._p4.run_fstat(local_path)
-                        # logger.debug(">>>>>>>>>>> fstat_list:{}".format(fstat_list))
-                        if fstat_list:
+                        if isinstance(fstat_list, list) and fstat_list:
                             for file_info in fstat_list:
+                                if not isinstance(file_info, dict):
+                                    continue
                                 if file_info:
                                     if isinstance(file_info, list) and len(file_info) == 1:
                                         file_info = file_info[0]
-                                    # logger.debug(">>>>>>>>>>> file_info:{}".format(file_info))
                                     head_rev = file_info.get('headRev', None)
                                     have_rev = file_info.get('haveRev', None)
-                                    # logger.debug(">>>>>>>>>>> (2) head_rev:{} have_rev:{}".format(head_rev, have_rev))
                                     published_file["headRev"] = head_rev
                                     published_file["haveRev"] = have_rev
-                        # logger.debug(">>>>>>>>>>> (3) head_rev:{} have_rev:{}".format(head_rev, have_rev))
                     if head_rev:
                         if not have_rev:
                             have_rev = "0"
@@ -5712,19 +4859,17 @@ class AppDialog(QWidget):
                     if not head_rev and not have_rev:
                         # fstat_list = self._p4.run_fstat(local_path + '/...')
                         fstat_list = self._p4.run_fstat(local_path)
-                        # logger.debug(">>>>>>>>>>> fstat_list:{}".format(fstat_list))
-                        if fstat_list:
+                        if isinstance(fstat_list, list) and fstat_list:
                             for file_info in fstat_list:
+                                if not isinstance(file_info, dict):
+                                    continue
                                 if file_info:
                                     if isinstance(file_info, list) and len(file_info) == 1:
                                         file_info = file_info[0]
-                                    # logger.debug(">>>>>>>>>>> file_info:{}".format(file_info))
                                     head_rev = file_info.get('headRev', None)
                                     have_rev = file_info.get('haveRev', None)
-                                    # logger.debug(">>>>>>>>>>> (2) head_rev:{} have_rev:{}".format(head_rev, have_rev))
                                     published_file["headRev"] = head_rev
                                     published_file["haveRev"] = have_rev
-                        # logger.debug(">>>>>>>>>>> (3) head_rev:{} have_rev:{}".format(head_rev, have_rev))
                     if head_rev:
                         if not have_rev:
                             have_rev = "0"
@@ -6413,19 +5558,6 @@ class AppDialog(QWidget):
         # Close the dialog after submission
         submitter_widget.accept()
 
-    def _on_submit_files_original(self):
-        """
-                When someone clicks on the "Submit Files" button
-        """
-        self.on_submit_deleted_files()
-        self.on_submit_other_files()
-        msg = "\n <span style='color:#2C93E2'>Updating the Pending view ...</span> \n"
-        self._add_log(msg, 2)
-        # Update the Pending view
-        self.update_pending_view()
-        #logger.debug(">>>>>>>>>>> Updating the publish view as well")
-        self._on_treeview_item_selected()
-
     def on_submit_deleted_files(self, change_sg_item, file_info_deleted):
         """
         When someone clicks on the "Submit Files" button
@@ -6617,77 +5749,6 @@ class AppDialog(QWidget):
 
         return entity, published_file
 
-    def get_entity_from_sg_item_original(self, sg_item):
-        # Check if the filepath leads to a valid shotgrid entity
-        entity, published_file = check_validity_by_published_file(sg_item)
-        if not entity:
-            entity, published_file = check_validity_by_path_parts(swc_fw, sg_item)
-        return entity, published_file
-
-
-    def convert_to_relative_path(self, absolute_path):
-        # Split the path on ":/" and take the second part, if it exists
-        parts = absolute_path.split(":/", 1)
-        relative_path = parts[1] if len(parts) > 1 else absolute_path
-
-        return relative_path
-
-    def _on_submit_other_files_original(self):
-        """
-        When someone clicks on the "Submit Files" button
-        Send pending files to the Shotgrid Publisher.
-        """
-        # Publish depot files
-        # Get the selected pending files
-        other_data_to_publish, deleted_data_to_publish = self.pending_tree_view.get_selected_publish_items_by_action()
-        #logger.debug(">>>>>>>>>>  other_data_to_publish: {}".format(other_data_to_publish))
-        #logger.debug(">>>>>>>>>>  deleted_data_to_publish: {}".format(deleted_data_to_publish))
-        if other_data_to_publish:
-            msg = "\n <span style='color:#2C93E2'>Submitting other pending files...</span> \n"
-            self._add_log(msg, 2)
-            if other_data_to_publish:
-                pass
-                # self._publish_other_pending_data(other_data_to_publish)
-                #logger.debug(">>>>>>>>>>  other_data_to_publish: {}".format(other_data_to_publish))
-
-            msg = "\n <span style='color:#2C93E2'>Updating the Pending view ...</span> \n"
-            self._add_log(msg, 2)
-            # Update the Pending view
-            self.update_pending_view()
-        else:
-            msg = "\n <span style='color:#2C93E2'>Please select files in the Pending view...</span> \n"
-            self._add_log(msg, 2)
-
-
-
-    def _delete_pending_data_original(self, selected_tuples_to_delete):
-        """
-        Publish Depot Data in the Pending view that needs to be deleted.
-        """
-        if selected_tuples_to_delete:
-            msg = "\n <span style='color:#2C93E2'>Submitting files for deletion...</span> \n"
-            self._add_log(msg, 2)
-            for change, file_to_submit in selected_tuples_to_delete:
-
-                #logger.debug(">>>>>>>>>>  file_to_submit: {}".format(file_to_submit))
-                #logger.debug(">>>>>>>>>>  change: {}".format(change))
-                if change and file_to_submit:
-                    try:
-                        msg = "{}".format(file_to_submit)
-                        self._add_log(msg, 4)
-                        submit_result, perforce_msg = submit_and_delete_file(self._p4, change, file_to_submit)
-                        msg = "Result of submitting file: {}".format(submit_result)
-                        self._add_log(msg, 4)
-                        #if perforce_msg:
-                        #    # Log the error message
-                        #    msg = "\n <span style='color:#CC3333'>{}</span> \n".format(perforce_msg)
-                        #    self._add_log(msg, 4)
-                        if submit_result and not perforce_msg:
-                            msg = "\n <span style='color:#2C93E2'>File deleted from Perforce:</span> \n".format(file_to_submit)
-                            self._add_log(msg, 2)
-                    except Exception as e:
-                        logger.debug("Error deleting file {}: {}".format(file_to_submit, e))
-
     def _delete_file_thread(self, p4, change, file_to_submit, log_callback):
         """
         Function to delete a file in a separate thread.
@@ -6819,34 +5880,6 @@ class AppDialog(QWidget):
                                     self._publish_deleted_data_using_command_line([sg_item])
 
             self._publish_deleted_data_using_command_line(deleted_data_to_publish)
-
-    def _publish_deleted_data_using_command_line_original(self, deleted_data_to_publish):
-        """
-        Publish Pending view Depot Data that needs to be deleted using the command line.
-        """
-        if deleted_data_to_publish:
-            for sg_item in deleted_data_to_publish:
-                #logger.debug(">>>>>>>>>>  sg_item {}".format(sg_item))
-                file_path = sg_item['path'].get('local_path', None) if 'path' in sg_item else None
-                #logger.debug(">>>>>>>>>>  file_path {}".format(file_path))
-                target_context = self._find_task_context(file_path)
-                #logger.debug(">>>>>>>>>>  target_context.entity {}".format(target_context.entity))
-                if target_context.entity and file_path:
-                    sg_item["entity"] = target_context.entity
-
-                    # Publish the file to Shotgrid with a new version number and "delete" action
-
-                    publisher = PublishItem(sg_item)
-                    publish_result = publisher.commandline_publishing()
-                    if publish_result:
-                        logger.debug("New data is: {}".format(publish_result))
-
-            msg = "\n <span style='color:#2C93E2'>Publishing files marked for delete is complete</span> \n"
-            self._add_log(msg, 2)
-        else:
-            msg = "\n <span style='color:#2C93E2'>No need to publish any file that is marked for deletion</span> \n"
-            self._add_log(msg, 2)
-
 
     def _publish_deleted_data_using_command_line(self, deleted_data_to_publish):
         """
@@ -7008,8 +6041,6 @@ class AppDialog(QWidget):
 
 
     def _sync_current_file(self):
-        #if not self._p4:
-        #    self._connect()
         files_to_sync, total_file_count = self._get_files_to_sync()
         files_to_sync_count = len(files_to_sync)
         if files_to_sync_count == 0:
@@ -7019,11 +6050,7 @@ class AppDialog(QWidget):
         elif files_to_sync_count > 0:
             msg = "\n <span style='color:#2C93E2'>Syncing {} files ... </span> \n".format(files_to_sync_count)
             self._add_log(msg, 2)
-            #self._do_sync_files_sequential(files_to_sync)
-            #self._do_sync_files_ThreadPool(files_to_sync)
-            #self._do_sync_files_concurrent_futures(files_to_sync)
             self._do_sync_files_threading_thread_2(files_to_sync)
-            #self._do_sync_files_threading_multi_thread(files_to_sync)
 
             msg = "\n <span style='color:#2C93E2'>Syncing files is complete</span> \n"
             self._add_log(msg, 2)
@@ -7031,18 +6058,11 @@ class AppDialog(QWidget):
             self._add_log(msg, 2)
             self._status_model.hard_refresh()
             self._publish_file_history_model.hard_refresh()
-            # self._publish_type_model.hard_refresh()
             self._publish_model.hard_refresh()
-            #for p in self._entity_presets:
-            #    self._entity_presets[p].model.hard_refresh()
             self._setup_file_details_panel([])
-            # self._get_perforce_summary()
 
             if self.main_view_mode == self.MAIN_VIEW_COLUMN:
                 self._populate_column_view_widget()
-                # self._set_thump_view_mode()
-                # time.sleep(1)
-                # self._set_column_view_mode()
 
             msg = "\n <span style='color:#2C93E2'>Reloading data is complete</span> \n"
             self._add_log(msg, 2)
@@ -7054,30 +6074,17 @@ class AppDialog(QWidget):
         self._add_log(msg, 2)
         self._status_model.hard_refresh()
         self._publish_file_history_model.hard_refresh()
-        # self._publish_type_model.hard_refresh()
         self._publish_model.hard_refresh()
-        # for p in self._entity_presets:
-        #    self._entity_presets[p].model.hard_refresh()
         self._setup_file_details_panel([])
         # self._get_perforce_summary()
 
         if self.main_view_mode == self.MAIN_VIEW_COLUMN:
             self._update_perforce_data()
             self._populate_column_view_widget()
-            #self._set_thump_view_mode()
-            #self._set_column_view_mode()
-            # time.sleep(1)
-            # self._set_column_view_mode()
-
 
     def _sync_entity_parents(self):
         logger.debug("Getting entity parents")
-        #logger.debug(">>> self._entity_data {}".format(self._entity_data))
-
-        # logger.debug(">>> getting entity parents")
         self._get_entity_parents(self._entity_data)
-        #logger.debug(">>> preparing entity parents published files")
-        #self._prepare_entity_parents_published_files()
         logger.debug("Syncing entity parents published files")
         self._sync_entity_parents_published_files()
 
@@ -7085,8 +6092,6 @@ class AppDialog(QWidget):
         """
         When someone clicks on the "Sync" button
         """
-        #if not self._p4:
-        #    self._connect()
         files_to_sync, total_file_count = self._get_files_to_sync()
         files_to_sync_count = len(files_to_sync)
         if files_to_sync_count == 0:
@@ -7127,39 +6132,14 @@ class AppDialog(QWidget):
 
                         out_file.write('%s\n' % file_to_publish)
                         action = self._get_action(sg_item)
-                        #logger.debug(">>>>>>>>>>  file_to_publish: {}".format(file_to_publish))
-                        #logger.debug(">>>>>>>>>>  action: {}".format(action))
                         if action:
                             action = self.action_dict.get(action, None)
-                            #logger.debug("><<<>>>>>>>>>>>>  action: {}".format(action))
-                            #logger.debug("><<<>>>>>>>>>>>>  change: {}".format(change))
                             add_res = add_to_change(self._p4, change, file_to_publish)
-                            #logger.debug("><<<>>>>>>>>>>>>  add_res: {}".format(add_res))
                             action_result = self._p4.run(action, "-c", change, "-v", file_to_publish)
-                            #logger.debug("><<<>>>>>>>>>>>>  action_result: {}".format(action_result))
-                        #action_result = self._p4.run("edit", "-c", change, "-v", file_to_publish)
-
-                        #add_res = add_to_change(self._p4, change, file_to_publish)
-                        #action_result = self._p4.run("edit", "-c", change, "-v", file_to_publish)
             out_file.close()
 
-            # Run the publisher UI
-
             engine = sgtk.platform.current_engine()
-            #logger.debug(">>>>>>>>>>  engine is {}".format(engine))
-
-            #logger.debug("<<<<>>>>  engine commands ")
-            #for key, value in engine.commands.items():
-            #    logger.debug("<<<<>>>>  {}:{}".format(key, value))
-
-
-            #properties = engine.commands['Publish...']['properties']
-            #logger.debug(">>>>>>>>>>  engine commands properties are {}".format(properties))
-
             engine.commands["Publish..."]["callback"]()
-
-            # msg = "\n <span style='color:#2C93E2'>Publishing files is complete</span> \n"
-            # self._add_log(msg, 2)
             msg = "\n <span style='color:#2C93E2'>Reloading data ...</span> \n"
             self._add_log(msg, 2)
             self._reload_treeview()
@@ -7174,51 +6154,6 @@ class AppDialog(QWidget):
 
         self._submitted_data_to_publish = []
 
-
-
-    def _publish_submitted_data_using_command_line_original(self):
-        """
-        Publish Depot Data
-        """
-        selected_item = self._get_selected_entity()
-        sg_entity = shotgun_model.get_sg_data(selected_item)
-        # logger.debug(">>>>>>>>>>  sg_entity {}".format(sg_entity))
-
-        if self._submitted_data_to_publish:
-            msg = "\n <span style='color:#2C93E2'>Publishing all unpublished files in the depot associated with this entity to Shotgrid ...</span> \n"
-            self._add_log(msg, 2)
-            files_count = len(self._submitted_data_to_publish)
-            for i, sg_item in enumerate(self._submitted_data_to_publish):
-                sg_item["entity"] = sg_entity
-                if 'path' in sg_item:
-                    rev = sg_item.get("version_number") or sg_item.get("headRev") or 1
-
-                    file_to_publish = sg_item['path'].get('local_path', None)
-                    msg = "({}/{})  Publishing file: {}#{}".format(i + 1, files_count, file_to_publish, rev)
-                    self._add_log(msg, 4)
-
-                    #p4_result = self._p4.run("add", "-v", file_to_publish)
-                    #p4_result = self._p4.run("edit", "-v", file_to_publish)
-                    #logger.debug("Adding file to perforce: {}".format(p4_result))
-
-                    publisher = PublishItem(sg_item)
-                    publish_result = publisher.commandline_publishing()
-                    # publish_result = publisher.gui_publishing()
-                    if publish_result:
-                        logger.debug("New data is: {}".format(publish_result))
-
-
-            msg = "\n <span style='color:#2C93E2'>Publishing files is complete</span> \n"
-            self._add_log(msg, 2)
-            msg = "\n <span style='color:#2C93E2'>Reloading data</span> \n"
-            self._add_log(msg, 2)
-            #self._reload_treeview()
-
-        else:
-            msg = "\n <span style='color:#2C93E2'>No need to publish any file</span> \n"
-            self._add_log(msg, 2)
-
-        self._submitted_data_to_publish = []
 
 
     def _publish_submitted_data_using_command_line(self):
@@ -7528,7 +6463,7 @@ class AppDialog(QWidget):
         #self.sync_command.append(parallel_cmd)
 
         for i, file_path in enumerate(files_to_sync):
-            depot_path = self._get_depot_filepath(file_path)
+            depot_path = self._convert_local_to_depot(file_path)
             depot_path = "{}#head".format(depot_path)
             self.sync_command.append(depot_path)
 
@@ -7546,7 +6481,7 @@ class AppDialog(QWidget):
         self.sync_command.append("threads=16,batch=4,batchsize=4096,min=1,minsize=1")
 
         for i, file_path in enumerate(files_to_sync):
-            depot_path = self._get_depot_filepath(file_path)
+            depot_path = self._convert_local_to_depot(file_path)
             depot_path = "{}#head".format(depot_path)
             self.sync_command.append(depot_path)
 
@@ -7580,12 +6515,6 @@ class AppDialog(QWidget):
         # wait for all threads to complete
         #sync_thread.join()
 
-    def run_sync_original(self):
-        # Sync files
-        p4_response = self._p4.run(self.sync_command)
-        #logger.debug("p4_response: {}".format(p4_response))
-        logger.debug(">>>>>>> Result of syncing file: {}".format(p4_response))
-
     def run_sync(self):
         # Sync files
         p4_response = self._p4.run(self.sync_command)
@@ -7601,30 +6530,6 @@ class AppDialog(QWidget):
 
         # The sync was successful
         logger.debug("File sync completed.")
-
-    def _do_sync_files_threading_thread_3(self, files_to_sync):
-        self.sync_command = []
-        self.sync_command.append("sync")
-        self.sync_command.append("-f")
-        self.sync_command.append("--parallel")
-        self.sync_command.append("threads=12,batch=8,batchsize=512,min=1,minsize=1")
-
-        total_tasks = len(files_to_sync)  # Total number of tasks
-        completed_tasks = 0  # Number of completed tasks
-        remaining_tasks = total_tasks  # Number of remaining tasks
-
-        semaphore = threading.Semaphore()  # Semaphore to track remaining tasks
-
-        for i, file_path in enumerate(files_to_sync):
-            depot_path = self._get_depot_filepath(file_path)
-            depot_path = "{}#head".format(depot_path)
-            self.sync_command.append(depot_path)
-
-        logger.debug("sync_command: {}".format(self.sync_command))
-
-        sync_thread = threading.Thread(target=self.run_sync_semaphore, args=(files_to_sync, semaphore, completed_tasks))
-        sync_thread.start()
-        self.update_progress_thread(sync_thread, total_tasks, completed_tasks, remaining_tasks)
 
     def update_progress_thread(self, thread, total_tasks, completed_tasks, remaining_tasks):
         while thread.is_alive():
@@ -7648,7 +6553,7 @@ class AppDialog(QWidget):
         self.sync_command.append("-f")
 
         for i, file_path in enumerate(files_to_sync):
-            depot_path = self._get_depot_filepath(file_path)
+            depot_path = self._convert_local_to_depot(file_path)
             depot_path = "{}#head".format(depot_path)
             self.sync_command.append(depot_path)
 
@@ -7668,7 +6573,7 @@ class AppDialog(QWidget):
         processes = []
         total = len(files_to_sync)
         for i, file_path in enumerate(files_to_sync):
-            depot_path = self._get_depot_filepath(file_path)
+            depot_path = self._convert_local_to_depot(file_path)
             depot_path = "{}#head".format(depot_path)
             msg = "({}/{})  Syncing file: {}".format(i + 1, total, file_path)
             self._add_log(msg, 3)
@@ -7677,14 +6582,6 @@ class AppDialog(QWidget):
 
         for p in processes:
             p.wait()
-
-    def _update_progress_original(self, value):
-        if 100 > value > 0:
-            self.ui.progress.setValue(value)
-            self.ui.progress.setVisible(True)
-        else:
-            self.ui.progress.setVisible(False)
-        QCoreApplication.processEvents()
 
     def _update_progress(self, value):
         """
@@ -7708,17 +6605,6 @@ class AppDialog(QWidget):
         # msg = "\n <span style='color:#CC3333'>{}:</span> \n".format(text)
         msg = "\n <span style='color:#d45239'>{}:</span> \n".format(text)
         self._add_log(msg, 2)
-
-    def _add_log_original(self, msg, flag):
-        if flag <= 2:
-            msg = "\n{}\n".format(msg)
-        else:
-            msg = "{}".format(msg)
-        self.ui.log_window.append(msg)
-        #if flag < 4:
-        #    logger.debug(msg)
-        self.ui.log_window.verticalScrollBar().setValue(self.ui.log_window.verticalScrollBar().maximum())
-        QCoreApplication.processEvents()
 
     def _add_log(self, msg, flag):
         """
@@ -8272,383 +7158,6 @@ class AppDialog(QWidget):
              self._on_home_clicked()
         # ----------------
 
-    def _load_entity_presets_original(self):
-        """
-        Loads the entity presets from the configuration and sets up buttons and models
-        based on the config.
-        """
-        app = sgtk.platform.current_bundle()
-
-        for setting_dict in app.get_setting("entities"):
-
-            # Validate that the setting dictionary contains all items needed.
-            # Here is an example of Hierarchy setting dictionary:
-            #     {'caption': 'Project',
-            #      'type':    'Hierarchy',
-            #      'root':    '{context.project}'
-            # Here is an example of Query setting dictionary:
-            #     {'caption':     'My Tasks',
-            #      'type':        'Query',
-            #      'entity_type': 'Task',
-            #      'hierarchy':   ['project', 'entity', 'content'],
-            #      'filters':     [['task_assignees', 'is', '{context.user}'],
-            #                      ['project.Project.sg_status', 'is', 'Active']]}
-
-            key_error_msg = (
-                "Configuration error: 'entities' item %s is missing key '%s'!"
-            )
-            value_error_msg = "Configuration error: 'entities' item %s key '%s' has an invalid value '%s'!"
-
-            key = "caption"
-            if key not in setting_dict:
-                raise TankError(key_error_msg % (setting_dict, key))
-
-            preset_name = setting_dict["caption"]
-
-            key = "type"
-            if key in setting_dict:
-                value = setting_dict[key]
-                if value not in ("Hierarchy", "Query"):
-                    raise TankError(value_error_msg % (setting_dict, key, value))
-                type_hierarchy = value == "Hierarchy"
-            else:
-                # When the type is not given, default to "Query".
-                type_hierarchy = False
-
-            if type_hierarchy:
-
-                key = "root"
-                if key not in setting_dict:
-                    raise TankError(key_error_msg % (setting_dict, key))
-
-                sg_entity_type = "Project"
-
-            else:
-
-                for key in ("entity_type", "hierarchy", "filters"):
-                    if key not in setting_dict:
-                        raise TankError(key_error_msg % (setting_dict, key))
-
-                sg_entity_type = setting_dict["entity_type"]
-
-            # get optional publish_filter setting
-            # note: actual value in the yaml settings can be None,
-            # that's why we cannot use setting_dict.get("publish_filters", [])
-            publish_filters = setting_dict.get("publish_filters")
-            if publish_filters is None:
-                publish_filters = []
-
-            # Create the model.
-            if type_hierarchy:
-                entity_root = self._get_entity_root(setting_dict["root"])
-                (model, proxy_model) = self._setup_hierarchy_model(app, entity_root)
-            else:
-                (model, proxy_model) = self._setup_query_model(app, setting_dict)
-
-
-            # ------------------------------------------------------------------------------
-            # Add a new tab and its layout to the main tab bar
-            logger.debug(f"[PRESET] Creating tab for preset: {preset_name}")
-            tab = QWidget()
-            layout = QVBoxLayout(tab)
-            layout.setSpacing(0)
-            layout.setContentsMargins(0, 0, 0, 0)
-            self.ui.entity_preset_tabs.addTab(tab, preset_name)
-
-            # Create and configure the tree view
-            view = QTreeView(tab)
-            layout.addWidget(view)
-            view.setModel(proxy_model)
-
-            view.setEditTriggers(QAbstractItemView.NoEditTriggers)
-            view.setProperty("showDropIndicator", False)
-            view.setIconSize(QSize(20, 20))
-            view.setStyleSheet("QTreeView::item { padding: 6px; }")
-            view.setUniformRowHeights(True)
-
-            if preset_name == "My Tasks":
-                logger.debug("Special handling for 'My Tasks' preset")
-
-                # Show two columns: Name and To Sync
-                view.setHeaderHidden(False)
-                view.header().setStretchLastSection(False)
-                view.header().setSectionResizeMode(QHeaderView.Stretch)
-                view.setSortingEnabled(True)
-                view.sortByColumn(0, Qt.AscendingOrder)
-
-                # Set column headers
-                source_model = proxy_model.sourceModel()
-                source_model.setHorizontalHeaderLabels(["Name", "To Sync"])
-                # logger.debug(f"[PRESET] Set headers: Name, To Sync")
-
-                row_count = source_model.rowCount()
-                # logger.debug(f"[PRESET] 'My Tasks' row count: {row_count}")
-
-                for row in range(row_count):
-                    # logger.debug(f"------------------------------------------------------------------")
-                    proxy_index = proxy_model.index(row, 0)
-                    if not proxy_index.isValid():
-                        # logger.debug(f"[PRESET] Row {row}: Invalid proxy index")
-                        continue
-
-                    source_index = proxy_model.mapToSource(proxy_index)
-                    if not source_index.isValid():
-                        # logger.debug(f"[PRESET] Row {row}: Invalid source index")
-                        continue
-
-                    # Get item using source_index.model(), not base model
-                    item_model = source_index.model()
-                    item = item_model.itemFromIndex(source_index)
-
-                    if not item:
-                        # logger.debug(f"[PRESET] Row {row}: No item in model")
-                        continue
-
-                    # Extract the Shotgun data and field value from the node item.
-                    (sg_data, entity_data) = model_item_data.get_item_data(item)
-
-                    # logger.debug(">>>>>>>>>>>>>> entity sg_data is: {}".format(sg_data))
-                    # logger.debug(">>>>>>>>>>>>>> entity entity_data is: {}".format(entity_data))
-
-
-                    entity_path, entity_id, entity_type = self._get_entity_info(entity_data)
-                    if not entity_id or not entity_type or not entity_path:
-                        # logger.debug(
-                        #    f"[PRESET] Row {row}: Invalid entity info — Path: {entity_path}, ID: {entity_id}, Type: {entity_type}")
-                        continue
-
-                    # logger.debug(f"[PRESET] Row {row}: Entity Path: {entity_path}")
-                    # logger.debug(f"[PRESET] Row {row}: Entity ID={entity_id}, Type={entity_type}")
-
-                    sync_count = self._get_sync_count_for_entity(entity_path)
-                    # logger.debug(f"[PRESET] Row {row}: Sync count = {sync_count}")
-
-                    # Set value into the second column
-                    if sync_count == 0:
-                        msg = "Up to date"
-                    else:
-                        msg = "{} To Sync".format(sync_count)
-                    desc_item = QStandardItem(str(msg))
-                    sync_icon = self.sync_icons.get_sync_pixmap(sync_count)
-                    if sync_icon:
-                        desc_item.setIcon(sync_icon)
-
-                    source_model.setItem(source_index.row(), 1, desc_item)
-                logger.debug("End of Special handling for 'My Tasks' preset")
-
-            else:
-                view.setHeaderHidden(True)
-                # logger.debug(f"[PRESET] Using default view setup for preset: {preset_name}")
-
-            # Keep references to avoid garbage collection
-            self._dynamic_widgets.extend([model, proxy_model, tab, layout, view])
-
-            #-------------------------------------------------------------------------------
-
-            if not type_hierarchy:
-
-                # FIXME: We should probably remove all of this block in favor of something like. Doesn't quite
-                # work at the moment so I'm leaving it as a suggestion to a future reader.
-                # search = SearchWidget(tab)
-                # search.setToolTip("Use the <i>search</i> field to narrow down the items displayed in the tree above.")
-                # search_layout.addWidget(search)
-                # search.set_placeholder_text("Search...")
-                # search.search_changed.connect(
-                #     lambda text, v=view, pm=proxy_model: self._on_search_text_changed(text, v, pm)
-                # )
-
-                # Add a layout to host search.
-                search_layout = QHBoxLayout()
-                layout.addLayout(search_layout)
-
-                # Add the search text field.
-                # search = QLineEdit(tab)
-                search = MyLineEdit(tab)
-                search.setStyleSheet(
-                    "QLineEdit{ border-width: 1px; "
-                    "background-image: url(:/res/search.png); "
-                    "background-repeat: no-repeat; "
-                    "background-position: center left; "
-                    "border-radius: 5px; "
-                    "padding-left:20px; "
-                    "margin:4px; "
-                    "height:22px; "
-                    "}"
-                )
-                search.setToolTip(
-                    "Use the <i>search</i> field to narrow down the items displayed in the tree above."
-                )
-
-                """
-                try:
-                    # This was introduced in Qt 4.7, so try to use it if we can...
-                    search.setPlaceholderText("Search...")
-                except:
-                    pass
-                """
-                search_layout.addWidget(search)
-
-
-                # Add a Search button.
-                logger.debug("Searching for items in the tree above, query text is {}".format(search.text()))
-                search_button = QPushButton("Search", tab)
-                search_button.setToolTip("Click to search for items displayed in the tree above.")
-
-                search_layout.addWidget(search_button)
-
-
-
-                # Add a cancel search button, disabled by default.
-                clear_search = QToolButton(tab)
-                icon = QIcon()
-                icon.addPixmap(
-                    QPixmap(":/res/clear_search.png"),
-                    QIcon.Normal,
-                    QIcon.Off,
-                )
-                clear_search.setIcon(icon)
-                clear_search.setAutoRaise(True)
-                # Ignore the boolean parameter in the lambda. There seems to be an odd bug here,
-                # probably in PySide2. Contrary to other places where we simply
-                # accept a two parameters, one for the boolean and a second default one,
-                # here we have to pass a default value to checked. If we don't, we get
-                #   TypeError: <lambda>() missing 1 required positional argument: 'checked'
-                #
-                clear_search.clicked.connect(
-                    lambda checked=True, editor=search: editor.setText("")
-                )
-                clear_search.setToolTip("Click to clear your current search.")
-                search_layout.addWidget(clear_search)
-
-                # logger.debug("Text at time of signal: {}".format(search.get_current_text()))
-
-                # Connect the returnPressed signal to fetch text from get_current_text
-
-                # Setup returnPressed to trigger search with processed events
-                search.returnPressed.connect(
-                    lambda v=view, pm=proxy_model, search=search: self.trigger_search(v, pm, search)
-                )
-
-                search_button.clicked.connect(
-                    lambda v=view, pm=proxy_model, search=search: self.trigger_search(v, pm, search)
-                )
-
-
-                # Keep a handle to all the new Qt objects, otherwise the GC may not work.
-                self._dynamic_widgets.extend(
-                    [search_layout, search, search_button, clear_search, icon]
-                )
-
-            else:
-                search = shotgun_search_widget.HierarchicalSearchWidget(tab)
-
-                search.search_root = entity_root
-
-                # When a selection is made, we are only interested into the paths to the node so we can refresh
-                # the model and expand the item.
-                search.node_activated.connect(
-                    lambda entity_type, entity_id, name, path_label, incremental_paths, view=view, proxy_model=proxy_model: self._node_activated(
-                        incremental_paths, view, proxy_model
-                    )
-                )
-                # When getting back the model items that were loaded, we will need the view and proxy model
-                # to expand the item.
-                model.async_item_retrieval_completed.connect(
-                    lambda item, view=view, proxy_model=proxy_model: self._async_item_retrieval_completed(
-                        item, view, proxy_model
-                    )
-                )
-                search.set_bg_task_manager(self._task_manager)
-                layout.addWidget(search)
-
-                self._dynamic_widgets.extend([search])
-
-            # We need to handle tool tip display ourselves for action context menus.
-            def action_hovered(action):
-                tip = action.toolTip()
-                if tip == action.text():
-                    QToolTip.hideText()
-                else:
-                    QToolTip.showText(QCursor.pos(), tip)
-
-            # Set up a view right click menu.
-            if type_hierarchy:
-
-                action_ca = QAction("Collapse All Folders", view)
-                action_ca.hovered.connect(lambda: action_hovered(action_ca))
-                action_ca.triggered.connect(view.collapseAll)
-                view.addAction(action_ca)
-                self._dynamic_widgets.append(action_ca)
-
-                action_reset = QAction("Reset", view)
-                action_reset.setToolTip(
-                    "<nobr>Reset the tree to its PTR hierarchy root collapsed state.</nobr><br><br>"
-                    "Any existing data contained in the tree will be cleared, "
-                    "affecting selection and other related states, and "
-                    "available cached data will be immediately reloaded.<br><br>"
-                    "The rest of the data will be lazy-loaded when navigating down the tree."
-                )
-                action_reset.hovered.connect(lambda: action_hovered(action_reset))
-                action_reset.triggered.connect(model.reload_data)
-                view.addAction(action_reset)
-                self._dynamic_widgets.append(action_reset)
-
-            else:
-
-                action_ea = QAction("Expand All Folders", view)
-                action_ea.hovered.connect(lambda: action_hovered(action_ea))
-                action_ea.triggered.connect(view.expandAll)
-                view.addAction(action_ea)
-                self._dynamic_widgets.append(action_ea)
-
-                action_ca = QAction("Collapse All Folders", view)
-                action_ca.hovered.connect(lambda: action_hovered(action_ca))
-                action_ca.triggered.connect(view.collapseAll)
-                view.addAction(action_ca)
-                self._dynamic_widgets.append(action_ca)
-
-                action_refresh = QAction("Refresh", view)
-                action_refresh.setToolTip(
-                    "<nobr>Refresh the tree data to ensure it is up to date with Flow Production Tracking.</nobr><br><br>"
-                    "Since this action is done in the background, the tree update "
-                    "will be applied whenever the data is returned from Flow Production Tracking.<br><br>"
-                    "When data has been added, it will be added into the existing tree "
-                    "without affecting selection and other related states.<br><br>"
-                    "When data has been modified or deleted, a tree rebuild will be done, "
-                    "affecting selection and other related states."
-                )
-                action_refresh.hovered.connect(lambda: action_hovered(action_refresh))
-                action_refresh.triggered.connect(model.async_refresh)
-                view.addAction(action_refresh)
-                self._dynamic_widgets.append(action_refresh)
-
-            view.setContextMenuPolicy(Qt.ActionsContextMenu)
-
-            # Set up an on-select callback.
-            selection_model = view.selectionModel()
-            self._dynamic_widgets.append(selection_model)
-
-            selection_model.selectionChanged.connect(self._on_treeview_item_selected)
-
-            overlay = ShotgunModelOverlayWidget(model, view)
-            self._dynamic_widgets.append(overlay)
-
-            # Store all these objects keyed by the caption.
-            ep = EntityPreset(
-                preset_name, sg_entity_type, model, proxy_model, view, publish_filters
-            )
-
-            self._entity_presets[preset_name] = ep
-
-        # hook up an event handler when someone clicks a tab
-        self.ui.entity_preset_tabs.currentChanged.connect(
-            self._on_entity_profile_tab_clicked
-        )
-
-        # finalize initialization by clicking the home button, but only once the
-        # data has properly arrived in the model.
-        self._on_home_clicked()
-
     def _load_entity_presets(self):
         """
         Loads entity presets from the configuration and sets up the UI for each tab.
@@ -8881,34 +7390,6 @@ class AppDialog(QWidget):
             QtCore.QTimer.singleShot(0, self._on_home_clicked)
 
 
-    def _get_sync_count_for_entity_original(self, key):
-        """
-        Given a ShotGrid entity, return how many files need to be synced for it.
-        Includes debug logging for tracing issues.
-        """
-
-        logger.debug(f"[SYNC CHECK] Checking entity: PATH={key}")
-
-        try:
-            sync_count = 0
-            key = key.rstrip('/')
-            # fstat_list = self._p4.run_fstat('-Of', key + '/...')
-            fstat_list = self._p4.run_fstat(key + '/...')
-            for i, fstat in enumerate(fstat_list):
-                if fstat:
-                    logger.debug(f"[SYNC CHECK] fstat {i}: {fstat}")
-                    have_rev = fstat.get('haveRev', "0")
-                    head_rev = fstat.get('headRev', "0")
-                    if self._to_sync(have_rev, head_rev):
-                        sync_count += 1
-                        logger.debug(f"sync_count: {sync_count}")
-
-            return sync_count
-
-        except Exception as e:
-            # logger.warning(f"[SYNC CHECK] Exception during sync check for entity path {key}: {e}")
-            return 0
-
     def _get_sync_count_for_entity(self, key):
         """
         Given a ShotGrid entity path, return how many files need to be synced for it.
@@ -8923,7 +7404,13 @@ class AppDialog(QWidget):
             # Get file status from Perforce
             fstat_list = self._p4.run_fstat(key + '/...')
 
+            if not isinstance(fstat_list, list):
+                logger.debug(f"[SYNC CHECK] run_fstat returned {type(fstat_list)} for {key}, skipping")
+                return 0
+
             for i, fstat in enumerate(fstat_list):
+                if not isinstance(fstat, dict):
+                    continue
                 if fstat:
                     # logger.debug(f"[SYNC CHECK] fstat {i}: {fstat}")
 
@@ -9222,71 +7709,6 @@ class AppDialog(QWidget):
                 # self._add_log(msg, 2)
         return entity_path, entity_id, entity_type
 
-    def _create_current_user_task_filesystem_structure_original(self):
-        """ Create a folder structure for the current user's tasks """
-        # Get the current user's ID
-        try:
-            user = login.get_current_user(self._app.sgtk)
-            # logger.debug("Current user is {}".format(user))
-            current_user_id = user.get("id", None)
-
-            if not current_user_id:
-                logger.debug("Could not get current user id")
-                return
-
-            #project = self._app.shotgun.find_one("Project", [["name", "is", sg_project_name]], ["id"])
-            project = self._app.context.project
-            if not project:
-                logger.debug("Could not get current project")
-                return
-
-            # Define the list of statuses you want to filter by
-            sg_status_list = ["ip", "rdy", "hld", "rev"]
-
-            # Find all tasks for the current user with the specified statuses
-            filters = [
-                ["project", "is", project],
-                ["task_assignees", "is", {"type": "HumanUser", "id": current_user_id}],
-                ["sg_status_list", "in", sg_status_list],
-            ]
-
-            fields = ["content", "entity", "entity.Shot", "entity.Asset"]
-
-            tasks = self._app.shotgun.find("Task", filters, fields)
-            # logger.debug("Current user tasks are {}".format(tasks))
-            # Create folders for each entity associated with the tasks
-            for task in tasks:
-                entity = task.get("entity", None)
-                # logger.debug("User task entity is: {}".format(entity))
-                if entity:
-                    entity_id = entity.get("id", None)
-                    entity_type = entity.get("type", None)
-                    if entity_type and entity_id:
-                        try:
-                            paths_from_entity = self._app.sgtk.paths_from_entity(entity_type, entity_id)
-                            #logger.debug("paths_from_entity is: {}".format(paths_from_entity))
-                            if paths_from_entity and len(paths_from_entity) > 0:
-                                result = self._check_paths_exist(paths_from_entity)
-                                if not result:
-                                    logger.debug("Paths do not exist for entity:{} on user system".format(entity))
-                                    logger.debug("Creating folder structure for entity: {} ...".format(entity))
-                                    self._app.sgtk.create_filesystem_structure(entity_type, entity_id)
-                                else:
-                                    logger.debug("Paths {} exist for entity: {} on user system".format(paths_from_entity, entity))
-                            else:
-                                logger.debug("No paths exist for entity:{} on SG".format(entity))
-                                logger.debug("Creating folder structure for entity:{} ...".format(entity))
-                                self._app.sgtk.create_filesystem_structure(entity_type, entity_id)
-
-                        except Exception as e:
-                            msg = "\n Unable to create file system structure for entity: {}, {} \n".format(entity_id, e)
-                            logger.debug(msg)
-                            pass
-        except Exception as e:
-            msg = "\n Unable to create file system structure for entity\n"
-            logger.debug(msg)
-            pass
-
     def _create_current_user_task_filesystem_structure(self):
         """Spawns a background thread to create a folder structure for the current user's tasks."""
         thread = threading.Thread(target=self._task_operations)
@@ -9420,355 +7842,6 @@ class AppDialog(QWidget):
             logger.debug("Unable to update entity name for {}: {}".format(entity_name, e))
 
             pass
-
-    def _on_treeview_item_selected_orig(self):
-        """
-        Slot triggered when someone changes the selection in a treeview.
-        """
-        #logger.debug("view_mode is: {}".format(self.main_view_mode))
-
-        self._fstat_dict = {}
-        #return_to_column_view_flag = False
-        #if self.main_view_mode == self.MAIN_VIEW_COLUMN:
-        #    return_to_column_view_flag = True
-        #    self._set_thump_view_mode()
-
-        self._entity_data, item = self._reload_treeview()
-
-        # logger.debug(">>>>>>>>>>1 In _on_treeview_item_selected entity_data is: {}".format(self._entity_data))
-
-        self._entity_path, entity_id, entity_type = self._get_entity_info(self._entity_data)
-
-        # Create SG file system structure
-        # self._create_filesystem_structure(self._entity_data)
-
-        # logger.debug(">>>>>>>>>>>>>>>>>> self._entity_path: {}".format(self._entity_path))
-
-        model = self.ui.publish_view.model()
-        # logger.debug(">>>>>>>>>>2 In _on_treeview_item_selected model.rowCount() is {}".format(model.rowCount()))
-
-        if model.rowCount() > 0:
-            self.get_current_sg_data()
-        else:
-            self.get_current_publish_data(entity_id, entity_type)
-
-        self._update_perforce_data()
-        self.print_publish_data()
-
-        #logger.debug("main_view_mode is: {}".format(self.main_view_mode))
-        #if return_to_column_view_flag:
-        if self.main_view_mode == self.MAIN_VIEW_COLUMN:
-            self._set_column_view_mode()
-            return_to_column_view_flag = False
-            # self._populate_column_view_widget()
-        if self.main_view_mode == self.MAIN_VIEW_SUBMITTED:
-            self._populate_submitted_widget()
-
-        # if Show details is checked, populate the shotgun panel
-        #if self.ui.details_tab.isVisible():
-        #    logger.debug(">>>>>>>>>>  Populating shotgun panel widget")
-        self._get_shotgun_panel_widget()
-
-        # self. _clean_sg_data()
-
-
-    def _on_treeview_item_selected_2(self):
-        """
-        Slot triggered when someone changes the selection in a treeview.
-        Resolves the correct entity for panel navigation, especially for Tasks.
-        """
-        self._fstat_dict = {}
-        self._entity_data, item = self._reload_treeview()
-
-        # --- Resolve the entity to navigate the panel to ---
-        target_entity_for_panel = None
-        if self._entity_data:
-            entity_type = self._entity_data.get("type")
-            if entity_type == "Task":
-                # Extract the linked entity (Asset/Shot) from the Task data
-                linked_entity = self._entity_data.get("entity")
-                # Ensure linked_entity is a valid dictionary with id and type
-                if linked_entity and isinstance(linked_entity, dict) and linked_entity.get("id") and linked_entity.get(
-                        "type"):
-                    target_entity_for_panel = linked_entity
-                    logger.debug(f"Resolved Task to linked entity for panel: {target_entity_for_panel}")
-                else:
-                    logger.warning(f"Task selected, but couldn't resolve linked entity from: {self._entity_data}")
-            else:
-                # For non-Task items, the entity data itself is the target
-                target_entity_for_panel = self._entity_data
-        # --- End Panel Entity Resolution ---
-
-        # --- Get path using original entity data (might still fail for Tasks) ---
-        # _get_entity_info is called inside _reload_treeview via _load_publishes_for_entity_item indirectly,
-        # but let's call it explicitly here if needed for self._entity_path
-        self._entity_path, _, _ = self._get_entity_info(self._entity_data)
-        logger.debug(f"Entity path determined as: {self._entity_path}")  # Log path result
-
-        # --- Load publishes based on the *linked* entity if it was a Task ---
-        entity_id_for_publishes = None
-        entity_type_for_publishes = None
-        if target_entity_for_panel:  # Use the resolved entity (Asset/Shot) for fetching publishes
-            entity_id_for_publishes = target_entity_for_panel.get("id")
-            entity_type_for_publishes = target_entity_for_panel.get("type")
-        elif self._entity_data:  # Fallback for non-task or unresolved task
-            entity_id_for_publishes = self._entity_data.get("id")
-            entity_type_for_publishes = self._entity_data.get("type")
-
-        model = self.ui.publish_view.model()
-        # Check source model row count if using proxy
-        source_model = model.sourceModel() if isinstance(model, QtGui.QSortFilterProxyModel) else model
-        # logger.debug(f"Publish source model row count: {source_model.rowCount()}")
-
-        # Always try to refresh publish data based on the resolved entity
-        if entity_id_for_publishes and entity_type_for_publishes:
-            # Assuming _load_publishes_for_entity_item handles fetching based on item data
-            # Let's ensure the publish model is explicitly loaded/reloaded here
-            # The 'item' variable holds the QStandardItem from the tree
-            self._load_publishes_for_entity_item(item)  # This should use the item's data
-            # Then, fetch current data based on the loaded model
-            self.get_current_sg_data()
-        else:
-            logger.warning("Could not determine entity ID/Type to fetch publishes.")
-            self._sg_data = []  # Clear sg_data if we can't fetch
-
-        # --- Update Perforce data and other UI elements ---
-        self._update_perforce_data()
-        self.print_publish_data()  # Assumes this uses self._sg_data
-
-        # --- Update panel, passing the RESOLVED entity ---
-        # Use QTimer.singleShot to ensure panel update happens after current event processing
-        QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(target_entity_for_panel))
-        # self._get_shotgun_panel_widget(target_entity_for_panel) # Original direct call
-
-        # --- Update other views ---
-        if self.main_view_mode == self.MAIN_VIEW_COLUMN:
-            # Use QTimer.singleShot if updates depend on panel/publish loading
-            QtCore.QTimer.singleShot(0, self._set_column_view_mode)
-            # self._set_column_view_mode() # Original direct call
-        if self.main_view_mode == self.MAIN_VIEW_SUBMITTED:
-            # Use QTimer.singleShot if updates depend on panel/publish loading
-            QtCore.QTimer.singleShot(0, self._populate_submitted_widget)
-            # self._populate_submitted_widget() # Original direct call
-
-    def _on_treeview_item_selected_3(self):
-
-        """
-        Slot triggered when someone changes the selection in a treeview.
-        Resolves the correct entity for panel navigation, especially for Tasks.
-        """
-        logger.debug("Treeview item selection changed.")
-        self._fstat_dict = {}  # Reset Perforce status
-
-        # 1. Get the selected item from the tree view FIRST
-        selected_item = self._get_selected_entity()
-
-        # --- Early exit if nothing is selected ---
-        if not selected_item:
-            logger.debug("No item selected in the tree view.")
-            # Clear dependent UI elements
-            self._publish_model.clear()  # Clear publish view
-            self._sg_data = []
-            self._fstat_dict = {}
-            self._entity_path = None
-            self._entity_data = None  # Ensure this is None
-            self._setup_file_details_panel([])  # Clear details panel
-            QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(None))  # Clear panel
-            # Optionally clear column/submitted views if applicable
-            if self.main_view_mode == self.MAIN_VIEW_COLUMN:
-                self.column_view_model.setRowCount(0)
-            if self.main_view_mode == self.MAIN_VIEW_SUBMITTED:
-                self._reset_submitted_widget()
-            return  # Stop processing
-
-        # 2. Extract the core ShotGrid data directly from the selected item
-        # model_item_data.get_item_data usually returns (sg_data, field_value)
-        # sg_data is the full dict for leaf nodes (Assets, Shots)
-        # field_value can be the entity dict for 'My Tasks' (Task entity)
-        # Let's prioritize field_value if it's an entity dict, else use sg_data
-        sg_data_from_tree, field_value_from_tree = model_item_data.get_item_data(selected_item)
-        logger.debug(f"Extracted data from selected tree item: sg_data={sg_data_from_tree}, field_value={field_value_from_tree}")
-
-        # Determine the primary entity data associated with the click
-        # This handles both Asset/Shot clicks and Task clicks correctly
-        entity_data_clicked = None
-        if isinstance(field_value_from_tree, dict) and field_value_from_tree.get("type") and field_value_from_tree.get(
-                "id"):
-            entity_data_clicked = field_value_from_tree  # e.g., Task data from 'My Tasks'
-            logger.debug(f"Using field_value as primary entity data: {entity_data_clicked}")
-        elif isinstance(sg_data_from_tree, dict) and sg_data_from_tree.get("type") and sg_data_from_tree.get("id"):
-            entity_data_clicked = sg_data_from_tree  # e.g., Asset data from 'Assets'
-            logger.debug(f"Using sg_data as primary entity data: {entity_data_clicked}")
-        else:
-            logger.error(
-                f"Could not extract valid entity data from selected tree item: sg_data={sg_data_from_tree}, field_value={field_value_from_tree}")
-            # Handle error state - maybe clear UI? For now, log and return.
-            return
-
-        # Store this primary data (Asset, Shot, or Task)
-        self._entity_data = entity_data_clicked  # THIS IS NOW RELIABLE
-
-        # 3. Resolve the entity for Panel Navigation (Handles Tasks)
-        target_entity_for_panel = None
-        if self._entity_data:
-            entity_type = self._entity_data.get("type")
-            if entity_type == "Task":
-                linked_entity = self._entity_data.get("entity")
-                if linked_entity and isinstance(linked_entity, dict) and linked_entity.get("id") and linked_entity.get(
-                        "type"):
-                    target_entity_for_panel = linked_entity
-                    logger.debug(f"Resolved Task to linked entity for panel: {target_entity_for_panel}")
-                else:
-                    logger.warning(f"Task selected, but couldn't resolve linked entity from: {self._entity_data}")
-            else:
-                target_entity_for_panel = self._entity_data  # Asset, Shot, etc.
-                logger.debug(f"Using selected entity for panel: {target_entity_for_panel}")
-        else:
-            # This case should ideally not happen due to the early exit, but good to keep
-            logger.warning("self._entity_data is unexpectedly None after extraction.")
-
-        # 4. Get the Filesystem Path (using the primary clicked entity data)
-        # _get_entity_info handles Task resolution internally if needed for path
-        self._entity_path, _, _ = self._get_entity_info(self._entity_data)
-        logger.debug(f"Entity path determined as: {self._entity_path}")
-
-        # 5. Trigger Publish Model Load (using the selected tree item)
-        # We call this primarily for its side effect of loading the publish model.
-        # We no longer rely on its return value here.
-        self._load_publishes_for_entity_item(selected_item)
-        # Note: _load_publishes_for_entity_item internally calls _publish_model.load_data,
-        # which *should* use the item's sg_data to set its filters correctly.
-
-        # 6. Get Data from Models (after they've potentially been updated)
-        self.get_current_sg_data()  # Populates self._sg_data from the publish model
-        self._update_perforce_data()  # Populates self._fstat_dict using self._sg_data and self._entity_path
-
-        # Optional: Debugging
-        # self.print_publish_data()
-
-        # 7. Update UI Elements (using timers for safety)
-
-        # Update panel, passing the RESOLVED entity for navigation
-        logger.debug(f"Scheduling panel update for: {target_entity_for_panel}")
-        QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(target_entity_for_panel))
-
-        # Update other views based on the current mode and populated data
-        if self.main_view_mode == self.MAIN_VIEW_COLUMN:
-            logger.debug("Scheduling Column View update.")
-            # _set_column_view_mode calls _populate_column_view_widget which uses self._sg_data and self._fstat_dict
-            QtCore.QTimer.singleShot(0, self._set_column_view_mode)
-        if self.main_view_mode == self.MAIN_VIEW_SUBMITTED:
-            logger.debug("Scheduling Submitted View update.")
-            # _populate_submitted_widget uses self._fstat_dict
-            QtCore.QTimer.singleShot(0, self._populate_submitted_widget)
-        # Add similar blocks for MAIN_VIEW_LIST, MAIN_VIEW_THUMB if they need explicit updates
-        # based on self._sg_data / self._fstat_dict after selection change.
-        # Currently, they might update automatically via model/view connections.
-
-        # Update breadcrumbs and history (already done in _reload_treeview, but let's ensure it's consistent)
-        # These were moved out of _reload_treeview in this refactor, place them here:
-        self._populate_entity_breadcrumbs(selected_item)
-        self._add_file_history_record(self._current_entity_preset, selected_item)
-        self._setup_file_details_panel([])  # Clear details initially
-
-    logger.debug("Finished _on_treeview_item_selected.")
-
-
-    def _on_treeview_item_selected_original(self):
-        """
-        Slot triggered when someone changes the selection in a treeview.
-        Handles both specific entity selections (Assets, Shots, Tasks) and
-        intermediate grouping nodes (Asset Types, Statuses, etc.).
-        """
-        logger.debug("Treeview item selection changed.")
-        self._fstat_dict = {}  # Reset Perforce status
-
-        # 1. Get the selected item from the tree view
-        selected_item = self._get_selected_entity()
-
-        # --- Handle case where nothing is selected (e.g., clearing selection) ---
-        if not selected_item:
-            logger.debug("No item selected in the tree view. Clearing UI.")
-            self._publish_model.clear()
-            self._sg_data = []
-            self._fstat_dict = {}
-            self._entity_path = None
-            self._entity_data = None
-            self._setup_file_details_panel([])
-            QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(None))
-            if self.main_view_mode == self.MAIN_VIEW_COLUMN:
-                self.column_view_model.setRowCount(0)
-            if self.main_view_mode == self.MAIN_VIEW_SUBMITTED:
-                self._reset_submitted_widget()
-            return
-
-        # 2. Extract data from the selected tree item
-        sg_data_from_tree, field_value_from_tree = model_item_data.get_item_data(selected_item)
-        logger.debug(f"Extracted data from selected tree item: sg_data={sg_data_from_tree}, field_value={field_value_from_tree}")
-
-        # 3. Determine if the selection is a specific entity or an intermediate node
-        is_specific_entity = False
-        entity_data_clicked = None
-        if isinstance(field_value_from_tree, dict) and field_value_from_tree.get("type") and field_value_from_tree.get("id"):
-            entity_data_clicked = field_value_from_tree  # e.g., Task data from 'My Tasks'
-            is_specific_entity = True
-        elif isinstance(sg_data_from_tree, dict) and sg_data_from_tree.get("type") and sg_data_from_tree.get("id"):
-            entity_data_clicked = sg_data_from_tree  # e.g., Asset data from 'Assets'
-            is_specific_entity = True
-
-        # 4. Perform UI updates common to both selection types
-        self._entity_data = entity_data_clicked  # Store the resolved entity data (or None)
-        self._populate_entity_breadcrumbs(selected_item)
-        self._add_file_history_record(self._current_entity_preset, selected_item)
-        self._setup_file_details_panel([])  # Clear details panel initially
-
-        # This is key: always ask the publish model to load data for the selected item.
-        # This method is designed to handle both leaf nodes and intermediate folders.
-        self._load_publishes_for_entity_item(selected_item)
-
-        # 5. Perform specific actions based on the selection type
-        if is_specific_entity:
-            # --- A specific entity (Asset, Shot, Task) was selected ---
-            logger.debug(f"Processing as specific entity: {self._entity_data}")
-
-            # Get filesystem path and fetch Perforce data
-            self._entity_path, _, _ = self._get_entity_info(self._entity_data)
-            logger.debug(f"Entity path determined as: {self._entity_path}")
-            self.get_current_sg_data()
-            self._update_perforce_data()
-
-            # Resolve the entity for panel navigation (handles Tasks correctly)
-            target_entity_for_panel = None
-            if self._entity_data.get("type") == "Task":
-                linked_entity = self._entity_data.get("entity")
-                if linked_entity and isinstance(linked_entity, dict):
-                    target_entity_for_panel = linked_entity
-            else:
-                target_entity_for_panel = self._entity_data
-
-            # Update the ShotGrid panel
-            logger.debug(f"Scheduling panel update for: {target_entity_for_panel}")
-            QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(target_entity_for_panel))
-
-        else:
-            # --- An intermediate grouping node was selected ---
-            logger.debug(f"Processing as intermediate node: {field_value_from_tree}")
-            # We have already loaded its children's publishes.
-            # Now, clear state related to a single entity context.
-            self._entity_path = None
-            self._sg_data = []
-            self._fstat_dict = {}
-            QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(None)) # Clear the panel
-
-        # 6. Refresh views that depend on the newly populated data
-        if self.main_view_mode == self.MAIN_VIEW_COLUMN:
-            logger.debug("Scheduling Column View update.")
-            QtCore.QTimer.singleShot(0, self._set_column_view_mode)
-        if self.main_view_mode == self.MAIN_VIEW_SUBMITTED:
-            logger.debug("Scheduling Submitted View update.")
-            QtCore.QTimer.singleShot(0, self._populate_submitted_widget)
-
-        logger.debug("Finished _on_treeview_item_selected.")
 
     #---------------------------------------------------
 
@@ -10163,39 +8236,6 @@ class AppDialog(QWidget):
             logger.error(f"Error in get_current_sg_data: {e}", exc_info=True)
             self._sg_data = []  # Ensure it's reset on error
 
-    def get_current_sg_data_original(self):
-        total_file_count = 0
-        self._sg_data = []
-        self._submitted_data_to_publish = []
-        try:
-            model = self.ui.publish_view.model()
-            # logger.debug(">>>>>>>>>> In get_current_sg_data model.rowCount() is {}".format(model.rowCount()))
-            if model.rowCount() > 0:
-                for row in range(model.rowCount()):
-                    model_index = model.index(row, 0)
-                    proxy_model = model_index.model()
-                    source_index = proxy_model.mapToSource(model_index)
-                    item = source_index.model().itemFromIndex(source_index)
-
-                    is_folder = item.data(SgLatestPublishModel.IS_FOLDER_ROLE)
-                    if not is_folder:
-                        # Run default action.
-                        total_file_count += 1
-                        sg_item = shotgun_model.get_sg_data(model_index)
-                        action = sg_item.get("action") or sg_item.get("headAction") or None
-                        if action and action in ["delete"]:
-                            # remove the item from the model
-                            # logger.debug(">>>>>>>>>>  Removing item: {}".format(sg_item))
-                            model.removeRow(row)
-                            # remove the model_index from the model
-                            # model.removeRow(model_index.row())
-
-                        else:
-                            self._sg_data.append(sg_item)
-        except:
-            pass
-
-
     def get_current_publish_data(self, entity_id, entity_type):
         self._sg_data = []
         logger.debug("Entity type is {}".format(entity_type))
@@ -10352,15 +8392,6 @@ class AppDialog(QWidget):
 
             #self._submitted_data_to_publish.append(sg_item)
 
-    def _get_submitted_changelists_original(self, folder_path):
-
-        changes = self._p4.run_changes('-s', 'submitted', folder_path + '/...')
-
-        for change in changes:
-            key = change['change']
-            if key not in self._submitted_changes:
-                self._submitted_changes[key] = change
-
     def _get_submitted_changelists(self, folder_path):
         try:
             if not self._p4.connected():
@@ -10400,164 +8431,6 @@ class AppDialog(QWidget):
                             sg_item["p4_user"] = p4_user
 
                     self._submitted_data_to_publish.append(sg_item)
-
-    def _on_publish_folder_action_original(self, action):
-        selected_indexes = self.ui.publish_view.selectionModel().selectedIndexes()
-        for model_index in selected_indexes:
-            proxy_model = model_index.model()
-            source_index = proxy_model.mapToSource(model_index)
-            item = source_index.model().itemFromIndex(source_index)
-
-            is_folder = item.data(SgLatestPublishModel.IS_FOLDER_ROLE)
-            if is_folder:
-                sg_item = shotgun_model.get_sg_data(model_index)
-                #logger.debug(">>>>>>>>>>  sg_item is: {}".format(sg_item))
-                if not sg_item:
-                    msg = "\n <span style='color:#2C93E2'>Unable to get item data</span> \n"
-                    self._add_log(msg, 2)
-                    continue
-                entity_type = sg_item.get('type', None)
-                entity_id = sg_item.get('id', None)
-                if entity_type and entity_id:
-                    logger.debug("action is: {}".format(action))
-                    if action in ["preview"]:
-                        msg = "\n <span style='color:#2C93E2'>Generating a preview of the folders, please stand by...</span> \n"
-                        self._add_log(msg, 2)
-                        self._preview_filesystem_structure(entity_type, entity_id, verbose_mode=True)
-                    elif action in ["create"]:
-                        msg = "\n <span style='color:#2C93E2'>Creating folders, please stand by...</span> \n"
-                        self._add_log(msg, 2)
-                        paths_not_on_disk = self._preview_filesystem_structure(entity_type, entity_id, verbose_mode=False)
-                        self._create_filesystem_structure_for_folder(entity_type, entity_id, paths_not_on_disk)
-                    elif action in ["unregister"]:
-                        msg = "\n <span style='color:#2C93E2'>Unregistering folders, please stand by...</span> \n"
-                        self._add_log(msg, 2)
-                        self._unregister_folders(entity_type, entity_id)
-                else:
-                    msg = "\n <span style='color:#CC3333'>No entities specified!</span> \n"
-                    self._add_log(msg, 2)
-
-    def _unregister_folders_original(self, entity_type, entity_id):
-        """
-        Unregister folders for the specified entity
-        """
-
-        try:
-
-            uf = self._app.sgtk.get_command("unregister_folders")
-            #logger.debug(">>>>>>>>>>  uf command is: {}".format(uf))
-            message_list = []
-
-            tk = sgtk.sgtk_from_entity(entity_type, entity_id)
-            if entity_type == "Task":
-                parent_entity = self._app.shotgun.find_one("Task",
-                                    [["id", "is", entity_id]],
-                                    ["entity"]).get("entity")
-                result = uf.execute({"entity": {"type": parent_entity["type"], "id": parent_entity["id"]}})
-                message_list.append(result)
-            else:
-                result = uf.execute({"entity": {"type": entity_type, "id": entity_id}})
-                message_list.append(result)
-            tk.synchronize_filesystem_structure()
-
-
-        except Exception as e:
-            # other errors are not expected and probably bugs - here it's useful with a callstack.
-            msg = "\n <span style='color:#CC3333'>Error when unregistering folders: {}</span> \n".format(e)
-            self._add_log(msg, 2)
-
-        else:
-            # report back to user
-            if message_list and len(message_list) > 0:
-                msg = "\n <span style='color:#2C93E2'>Unregistered Folders:</span> \n"
-                self._add_log(msg, 2)
-                for message in message_list:
-                    self._add_log(message, 3)
-
-
-
-    def _create_filesystem_structure_for_folder_original(self, entity_type, entity_id, paths_not_on_disk):
-        if len(paths_not_on_disk) == 0:
-            msg = "\n <span style='color:#2C93E2'>No folders would be generated on disk for this item!</span> \n"
-            self._add_log(msg, 2)
-            return
-
-        paths_created = []
-        try:
-            tk = sgtk.sgtk_from_entity(entity_type, entity_id)
-            entities_processed = self._app.sgtk.create_filesystem_structure(entity_type, entity_id)
-            tk.synchronize_filesystem_structure()
-
-        except Exception as e:
-            # other errors are not expected and probably bugs - here it's useful with a callstack.
-            msg = "\n <span style='color:#CC3333'>Error when creating folders!, {}</span> \n".format(e)
-            self._add_log(msg, 2)
-
-        else:
-            # report back to user
-            if len(paths_not_on_disk) > 0:
-                for path in paths_not_on_disk:
-                    # If the path exist on disk, add it to paths_created
-                    if os.path.exists(path):
-                        paths_created.append(path)
-
-                if len(paths_created) > 0:
-                    if len(paths_created) == 1:
-                        msg = "\n <span style='color:#2C93E2'>The following {} folder has been created on disk.</span> \n".format(len(paths_created))
-                    else:
-                        msg = "\n <span style='color:#2C93E2'>The following {} folders have been created on disk.</span> \n".format(len(paths_created))
-                    self._add_log(msg, 2)
-                    for path in paths_created:
-                        self._add_log(path, 3)
-
-
-    def _preview_filesystem_structure_original(self, entity_type, entity_id, verbose_mode=True):
-        paths = []
-        paths_not_on_disk = []
-        try:
-            paths.extend(
-                self._app.sgtk.preview_filesystem_structure(entity_type, entity_id)
-            )
-
-        except Exception as e:
-            # other errors are not expected and probably bugs - here it's useful with a callstack.
-            msg = "\n <span style='color:#CC3333'>Error when previewing folders!, {}</span> \n".format(e)
-            self._add_log(msg, 2)
-
-        else:
-            # success! report back to user
-            if len(paths) == 0:
-                msg = "\n <span style='color:#2C93E2'>*No folders would be generated on disk for this item!*</span> \n"
-                self._add_log(msg, 2)
-
-            else:
-                # msg = "\n <span style='color:#2C93E2'>Creating folders would generate {} items on disk: </span> \n".format(len(paths))
-                # self._add_log(msg, 2)
-
-                for path in paths:
-                    path.replace(r"\_", r"\\_")
-                    # If the path doesn't exist on disk, add it to paths_not_on_disk
-                    if not os.path.exists(path):
-                        paths_not_on_disk.append(path)
-                self._add_log("", 3)
-
-                if paths_not_on_disk:
-                    if verbose_mode:
-                        if len(paths_not_on_disk) == 1:
-                            msg = "\n <span style='color:#2C93E2'>The following {} folder is not currently present on the disk and will be created:</span> \n".format(len(paths_not_on_disk))
-                        else:
-                            msg = "\n <span style='color:#2C93E2'>The following {} folders are not currently present on the disk and will be created:</span> \n".format(len(paths_not_on_disk))
-                        self._add_log(msg, 2)
-                        for path in paths_not_on_disk:
-                            self._add_log(path, 3)
-                        self._add_log("", 3)
-                if paths and not paths_not_on_disk:
-                    if verbose_mode:
-                        msg = "\n <span style='color:#2C93E2'>All folders are currently present on the disk and will not be created!</span> \n"
-                        self._add_log(msg, 2)
-
-            return paths_not_on_disk
-
 
     def _on_publish_folder_action(self, action):
         selected_indexes = self.ui.publish_view.selectionModel().selectedIndexes()
@@ -10751,83 +8624,6 @@ class AppDialog(QWidget):
             return word
 
 
-    def _on_publish_model_action_original(self, action):
-        selected_actions = []
-        selected_files_to_revert = []
-        selected_indexes = self.ui.publish_view.selectionModel().selectedIndexes()
-        self._submitted_data_to_publish = []
-        for model_index in selected_indexes:
-            proxy_model = model_index.model()
-            source_index = proxy_model.mapToSource(model_index)
-            item = source_index.model().itemFromIndex(source_index)
-
-            is_folder = item.data(SgLatestPublishModel.IS_FOLDER_ROLE)
-            if not is_folder:
-                sg_item = shotgun_model.get_sg_data(model_index)
-
-                if "path" in sg_item:
-                    if "local_path" in sg_item["path"]:
-                        target_file = sg_item["path"].get("local_path", None)
-                        depot_file = sg_item.get("depotFile", None)
-                        if action in ["fix"]:
-                            published_file_type = sg_item.get("published_file_type", None)
-                            if published_file_type not in ["PublishedFile"]:
-                                msg = "Fixing file {} ...".format(target_file)
-                                self._add_log(msg, 3)
-                                self._submitted_data_to_publish.append(sg_item)
-                            else:
-                                msg = "Cannot fix file {} as it is already published.".format(target_file)
-                                self._add_log(msg, 2)
-
-                        if action in ["add", "move/add", "edit", "delete"]:
-                            sg_item_action = sg_item.get("action", None)
-                            if sg_item_action and sg_item_action == "delete":
-                                msg = "Cannot perform the action on the file {} as it has already been marked for deletion or is deleted.".format(
-                                    depot_file)
-
-                                self._add_log(msg, 2)
-                                continue
-
-                            if action == "delete":
-                                msg = "Marking file {} for deletion ...".format(depot_file)
-                            else:
-                                msg = "{} file {}".format(action, depot_file)
-                            self._add_log(msg, 2)
-                            selected_actions.append((sg_item, action))
-
-
-                        elif action == "revert":
-
-                            # Collect files to revert instead of reverting immediately
-
-                            if target_file:
-                                selected_files_to_revert.append(target_file)
-
-                                msg = "Preparing to revert file {} ...".format(target_file)
-
-                                self._add_log(msg, 3)
-
-        if self._submitted_data_to_publish:
-            self._on_fix_list()
-
-        # --- Perform bulk revert after the loop ---
-        if action == "revert" and selected_files_to_revert:
-            try:
-                msg = f"Reverting {len(selected_files_to_revert)} selected file(s)..."
-                self._add_log(msg, 2)
-                # Use argument unpacking (*) to pass all files at once
-                p4_result = self._p4.run("revert", *selected_files_to_revert)
-                logger.debug(f"Bulk revert result: {p4_result}")
-                if p4_result:  # Check if the command was successful (might need adjustment based on p4python output)
-                    self.refresh_publish_data()  # Refresh data once after bulk operation
-            except Exception as e:
-                logger.error(f"Error during bulk revert: {e}")
-                self._add_log(f"Error during bulk revert: {e}", 2)  # Show error in log window
-        if selected_actions:
-            self.perform_changelist_selection(selected_actions)
-        #logger.debug(">>>>>>>>>>  publish_model.async_refresh...")
-        self._publish_model.async_refresh()
-
     def _on_publish_model_action(self, action):
         selected_actions = []
         selected_files_to_revert = []
@@ -11020,32 +8816,6 @@ class AppDialog(QWidget):
         # tell publish UI to update itself
         sg_data = self._load_publishes_for_entity_item(selected_item)
         return sg_data
-
-    def _reload_treeview_orig(self):
-        """
-        Slot triggered when someone changes the selection in a treeview.
-        """
-        selected_item = self._get_selected_entity()
-
-        # update breadcrumbs
-        self._populate_entity_breadcrumbs(selected_item)
-
-        # when an item in the treeview is selected, the child
-        # nodes are displayed in the main view, so make sure
-        # they are loaded.
-        model = self._entity_presets[self._current_entity_preset].model
-        if selected_item and model.canFetchMore(selected_item.index()):
-            model.fetchMore(selected_item.index())
-
-        # notify file_history
-        self._add_file_history_record(self._current_entity_preset, selected_item)
-
-        # tell details panel to clear itself
-        self._setup_file_details_panel([])
-
-        # tell publish UI to update itself
-        sg_data = self._load_publishes_for_entity_item(selected_item)
-        return sg_data, selected_item
 
     def _reload_treeview(self):
         """
@@ -11252,82 +9022,8 @@ class AppDialog(QWidget):
         self.ui.entity_breadcrumbs.setText("<big>%s</big>" % breadcrumbs)
 
     ################################################################################################
-    def _convert_local_to_depot_original(self, local_directory):
-
-        local_directory = os.path.abspath(local_directory)
-        where_output = self._p4.run_where(local_directory)
-
-        depot_directory = None
-        for mapping in where_output:
-            depot_directory = mapping.get('depotFile')
-            if depot_directory:
-                break
-
-        return depot_directory
-
-
     def _convert_local_to_depot(self, local_path):
-        """
-        Converts a local file path to a Perforce depot path.
-
-        Args:
-            local_path (str): The local file path.
-
-        Returns:
-            str: The corresponding depot path.
-        """
-        # Remove the drive letter (e.g., B:) and leading backslash
-        depot_path = local_path[2:].lstrip("\\")
-        # Replace backslashes with forward slashes
-        depot_path = depot_path.replace("\\", "/")
-        # Add the depot prefix (e.g., "//")
-        depot_path = f"//{depot_path}"
-        return depot_path
-
-    def _convert_local_to_depot_2(self, local_directory):
-        """
-        Converts a local file/directory path to its Perforce depot path.
-
-        Args:
-            local_directory (str): The local path to be converted.
-
-        Returns:
-            str: The depot path corresponding to the local path, or None if not found.
-        """
-        # Ensure the input path is absolute
-        local_directory = os.path.abspath(local_directory)
-
-        try:
-            # Run the Perforce `where` command
-            where_output = self._p4.run_where(local_directory)
-        except Exception as e:
-            # Log the exception if the command fails
-            logger.error(f"Failed to run `p4 where` for {local_directory}: {e}")
-            return None
-
-        # Validate the output of `run_where`
-        if not where_output or not isinstance(where_output, list):
-            logger.error(f"`p4 where` returned invalid data for {local_directory}: {where_output}")
-            return None
-
-        # Attempt to find the depot path
-        depot_directory = None
-        for mapping in where_output:
-            if isinstance(mapping, dict):
-                depot_directory = mapping.get('depotFile')
-                if depot_directory:
-                    break
-            else:
-                logger.warning(f"Unexpected mapping format for {local_directory}: {mapping}")
-
-        if depot_directory:
-            # Return the found depot path
-            logger.debug(f"Depot path for {local_directory} is {depot_directory}")
-            return depot_directory
-        else:
-            # Log a warning if no mapping was found
-            logger.warning(f"No depot mapping found for {local_directory}")
-            return None
+        return local_to_depot(local_path)
 
     def _get_perforce_data(self):
         """
@@ -11357,14 +9053,7 @@ class AppDialog(QWidget):
             if key:
                 #logger.debug(">>>>>>>>>>  key is: {}".format(key))
                 key = self._convert_local_to_depot(key)
-                #logger.debug(">>>>>>>>>> Converted key is: {}".format(key))
                 key = key.rstrip('/')
-                """
-                #logger.debug(">>>>>>>>>> modifed key is: {}".format(key))
-                fstat_list = self._p4.run_fstat('-Of', key + '/...')
-                self._get_submitted_changelists(key)
-                # logger.debug(">>>>>>>>>>  self._submitted_changes is: {}".format(self._submitted_changes))
-                """
                 # Retry fstat to handle transient failures
                 max_retries = 3
                 fstat_list = None
@@ -11401,12 +9090,6 @@ class AppDialog(QWidget):
                                 self._fstat_dict[newkey] = fstat
                                 self._fstat_dict[newkey]['Published'] = False
                                 self._fstat_dict[newkey]["revision"] = "#{}/{}".format(have_rev, head_rev)
-                                #self._fstat_dict[newkey]["code"] = "{}#{}".format(fstat.get("name", None),head_rev)
-                                #self._fstat_dict[newkey]["depot_file_type"] = self._get_publish_type(client_file)
-                                #self._fstat_dict[newkey]["name"] = os.path.basename(client_file)
-                                #self._fstat_dict[newkey]["path"] = {}
-                                #self._fstat_dict[newkey]["path"]["local_path"] = client_file
-
 
                                 action = fstat.get('action', None) or fstat.get('headAction', None)
                                 if action:
@@ -11464,18 +9147,8 @@ class AppDialog(QWidget):
             return status.lower()
         return None
 
-    def _get_item_path (self, local_path):
-        """
-        Get item path
-        """
-        item_path = ""
-        if local_path:
-            local_path = local_path.split("\\")
-            local_path = local_path[:7]
-            item_path = "\\".join(local_path)
-        return item_path
 
-    def _get_small_peforce_data(self, sg_data):
+    def _get_small_perforce_data(self, sg_data):
         """"
         Get small perforce data
         """
@@ -11508,16 +9181,6 @@ class AppDialog(QWidget):
             p4_result = self._p4.run("sync", "-f", file_path + "#head")
             logger.debug("Syncing file: {}".format(file_path))
 
-    def _get_depot_filepath(self, local_path):
-        
-        #Convert local path to depot path
-        #For example, convert: 'B:\\Ark2Depot\\Content\\Base\\Characters\\Human\\Survivor\\Armor\\Cloth_T3\\_ven\\MDL\\Survivor_M_Armor_Cloth_T3_MDL.fbx'
-        #to "//Ark2Depot/Content/Base/Characters/Human/Survivor/Armor/Cloth_T3/_ven/MDL/Survivor_M_Armor_Cloth_T3_MDL.fbx"
-        
-        local_path = local_path[2:]
-        depot_path = local_path.replace("\\", "/")
-        depot_path = "/{}".format(depot_path)
-        return depot_path
 
 
     def _find_task_context(self, path):
@@ -11674,96 +9337,6 @@ class MyLineEdit(QLineEdit):
         # logger.debug(">>>>>>>>>>  self._currentText is: {}".format(self._currentText))
         return self._currentText  # Accessor method to get the stored text
 
-
-class ShotGridLogHandlerOld(logging.Handler):
-    def __init__(self, log_window):
-        super().__init__()
-        self.log_window = log_window
-        self.log_queue = []
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.flush)
-        self.timer.start(100)  # Update log window every 100ms
-
-    def is_debug_logging_disabled(self):
-        # find if shotgrid debug logging is disabled
-        return False
-
-    def emit(self, record):
-        if record.levelno == logging.DEBUG and self.is_debug_logging_disabled():
-            return  # Skip debug logs if debug logging is enabled
-
-        msg = self.format(record)
-        color = self.get_color(record.levelno)
-        formatted_msg = f'<span style="color: {color};">{msg}</span><br>'
-        self.log_queue.append(formatted_msg)
-
-    def flush(self):
-        if self.log_queue:
-            self.log_window.append(''.join(self.log_queue))
-            self.log_queue = []
-            self.log_window.verticalScrollBar().setValue(self.log_window.verticalScrollBar().maximum())
-            QCoreApplication.processEvents()
-
-
-    def get_color(self, levelno):
-        if levelno == logging.DEBUG:
-            return '#A9A9A9'  # Dark Grey
-        elif levelno == logging.INFO:
-            return '#D3D3D3'  # Light Grey
-        elif levelno == logging.WARNING:
-            return '#FFD700'  # Dark Yellow
-        elif levelno == logging.ERROR:
-            #return '#B22222'  # Dark Red
-            return '#d45239'  # Red
-        elif levelno == logging.CRITICAL:
-            return '#FF8C00'  # Dark Orange
-        return '#A9A9A9'  # Dark Grey
-
-class ShotGridLogHandlerOriginal(logging.Handler):
-    def __init__(self, log_window):
-        super().__init__()
-        self.log_window = log_window
-        self.log_queue = []
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.flush)
-        self.timer.start(100)  # Update log window every 100ms
-
-    def is_debug_logging_disabled(self):
-        # find if shotgrid debug logging is disabled
-        return False
-    def emit(self, record):
-        #if record.levelno == logging.DEBUG and self.is_debug_logging_disabled():
-        #    return  # Skip debug logs if debug logging is enabled
-
-        msg = self.format(record)
-        color = self.get_color(record.levelno)
-        formatted_msg = f'<span style="color: {color};">{msg}</span><br>'
-        self.log_queue.append(formatted_msg)
-
-    def flush(self):
-        if self.log_queue:
-            self.log_window.append(''.join(self.log_queue))
-            self.log_queue = []
-            self.log_window.verticalScrollBar().setValue(self.log_window.verticalScrollBar().maximum())
-            QCoreApplication.processEvents()
-
-    def get_color(self, levelno):
-        if levelno == logging.DEBUG:
-            return '#A9A9A9'  # Dark Grey
-        elif levelno == logging.INFO:
-            return '#D3D3D3'  # Light Grey
-        elif levelno == logging.WARNING:
-            return '#FFD700'  # Dark Yellow
-        elif levelno == logging.ERROR:
-            # return '#B22222'  # Dark Red
-            return '#d45239'  # Red
-        elif levelno == logging.CRITICAL:
-            return '#FF8C00'  # Dark Orange
-        return '#A9A9A9'  # Dark Grey
-
-import logging
-import os
-#from PySide2.QtCore import QTimer, QCoreApplication
 
 class ShotGridLogHandler(logging.Handler):
     def __init__(self, log_window):

@@ -12,8 +12,6 @@ import sgtk
 #import datetime
 from sgtk.platform.qt import QtCore, QtGui
 from .model_latestpublish import SgLatestPublishModel
-#from .utils import ResizeEventFilter
-# from .utils import get_action_icon
 from .utils import Icons
 
 # import the shotgun_model and view modules from the shotgun utils framework
