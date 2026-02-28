@@ -14,6 +14,7 @@ operations. Single source of truth for the P4 connection object.
 """
 
 import os
+import subprocess
 import time
 import threading
 try:
@@ -27,41 +28,11 @@ from sgtk.platform.qt import QtCore
 for name, cls in QtCore.__dict__.items():
     if isinstance(cls, type): globals()[name] = cls
 
-from P4 import Progress as P4Progress
-
 from .utils import local_to_depot
 
 logger = sgtk.platform.get_logger(__name__)
 
 MAX_SYNC_THREADS = 16
-
-
-class CancelProgress(P4Progress):
-    """Minimal P4.Progress handler that cancels run_sync mid-transfer.
-
-    P4Python calls update() periodically on the SAME thread that called
-    run_sync, so checking a flag here is thread-safe. Returning non-zero
-    from update() tells P4 to abort the current operation.
-    """
-
-    def __init__(self, cancel_flag_fn):
-        P4Progress.__init__(self)
-        self._cancel_flag_fn = cancel_flag_fn
-
-    def init(self, type):
-        pass
-
-    def setDescription(self, description, unit):
-        pass
-
-    def setTotal(self, total):
-        pass
-
-    def update(self, position):
-        return 1 if self._cancel_flag_fn() else 0
-
-    def done(self, fail):
-        pass
 
 
 class PerforceSyncManager(QtCore.QObject):
@@ -93,8 +64,8 @@ class PerforceSyncManager(QtCore.QObject):
         self._sync_active = threading.Event()
         self._cancel_requested = False
         self._sync_thread = None
-        self._worker_connections = []  # P4 connections for active worker threads
-        self._worker_connections_lock = threading.Lock()
+        self._active_procs = set()    # subprocess.Popen objects for active syncs
+        self._active_procs_lock = threading.Lock()
 
         # Clobber prompt coordination between coordinator thread and UI
         self._clobber_response = threading.Event()
@@ -296,16 +267,12 @@ class PerforceSyncManager(QtCore.QObject):
     def cancel_sync(self):
         """Cancel the current sync operation.
 
-        Sets the cancel flag which is checked in two places:
-        1. Each worker's while-loop condition (between files)
-        2. CancelProgress.update() callback (during file transfers)
+        Sets the cancel flag (checked between files by workers) and
+        terminates all active p4 sync subprocesses to immediately
+        interrupt in-flight file transfers.
 
-        The CancelProgress handler is called by P4 on the worker's own
-        thread during transfers, so returning 1 safely aborts run_sync
-        mid-transfer — even for large files. No cross-thread P4 access.
-
-        The coordinator's finally block handles connection cleanup and
-        emits sync_completed once all workers have stopped.
+        Partially transferred files are left incomplete — Perforce
+        will re-sync them on the next sync operation.
         """
         self._cancel_requested = True
         self.log_message.emit(
@@ -313,6 +280,15 @@ class PerforceSyncManager(QtCore.QObject):
 
         # Unblock coordinator if it's waiting for clobber response.
         self._clobber_response.set()
+
+        # Kill all active p4 sync subprocesses immediately.
+        with self._active_procs_lock:
+            procs = list(self._active_procs)
+        for proc in procs:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
 
     def respond_to_clobber(self, overwrite):
         """Called by the UI after the user responds to the clobber prompt.
@@ -332,9 +308,9 @@ class PerforceSyncManager(QtCore.QObject):
         "can't clobber" errors.  If any are found, emits clobber_prompt
         and blocks until the user responds (via respond_to_clobber).
 
-        Spawns up to MAX_SYNC_THREADS worker threads, each with its own
-        P4 connection, pulling files from a shared queue. Progress is
-        reported per completed file. Cancel disconnects all workers.
+        Spawns up to MAX_SYNC_THREADS worker threads, each running p4.exe
+        as a subprocess for each file. Subprocesses can be terminated
+        instantly on cancel. Progress is reported per completed file.
         """
         # If a previous sync thread is still running, wait briefly.
         if self._sync_thread and self._sync_thread.is_alive():
@@ -452,25 +428,61 @@ class PerforceSyncManager(QtCore.QObject):
                 for f in files:
                     file_queue.put(f)
 
+                # --- Build p4 command base from coordinator connection ---
+                p4_cmd = [
+                    "p4",
+                    "-p", coord_p4.port,
+                    "-u", coord_p4.user,
+                    "-c", coord_p4.client,
+                ]
+                if getattr(coord_p4, 'charset', None):
+                    p4_cmd += ["-C", coord_p4.charset]
+
                 # --- Worker function ---
-                def worker(worker_p4):
+                # Each worker pulls files from the queue and syncs them
+                # via p4.exe subprocesses.  Subprocesses can be safely
+                # terminated from any thread on cancel.
+                def worker():
                     while not self._cancel_requested:
                         try:
                             depot_file = file_queue.get_nowait()
                         except queue.Empty:
                             break
                         file_name = depot_file.rsplit("/", 1)[-1]
+
+                        cmd = list(p4_cmd) + ["sync", "-q"]
+                        if depot_file in force_files:
+                            cmd.append("-f")
+                        cmd.append("{}#head".format(depot_file))
+
+                        logger.debug("Worker syncing: %s", depot_file)
+                        # Hide console window on Windows
+                        startupinfo = None
+                        if os.name == "nt":
+                            startupinfo = subprocess.STARTUPINFO()
+                            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                        proc = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            startupinfo=startupinfo,
+                        )
+                        with self._active_procs_lock:
+                            self._active_procs.add(proc)
                         try:
-                            logger.debug("Worker syncing: %s", depot_file)
-                            if depot_file in force_files:
-                                worker_p4.run_sync("-f", "{}#head".format(depot_file))
-                            else:
-                                worker_p4.run_sync("{}#head".format(depot_file))
-                        except Exception as e:
-                            if self._cancel_requested:
-                                break
-                            logger.error("Failed to sync %s: %s", depot_file, e)
-                            errors.append((depot_file, str(e)))
+                            _, stderr_data = proc.communicate()
+                        finally:
+                            with self._active_procs_lock:
+                                self._active_procs.discard(proc)
+
+                        if self._cancel_requested:
+                            break
+
+                        if proc.returncode != 0:
+                            err_msg = stderr_data.decode("utf-8", errors="replace").strip()
+                            logger.error("Failed to sync %s: %s", depot_file, err_msg)
+                            errors.append((depot_file, err_msg))
+
                         with completed_lock:
                             completed[0] += 1
                             count = completed[0]
@@ -478,58 +490,24 @@ class PerforceSyncManager(QtCore.QObject):
                         self.log_message.emit("({}/{}) {}".format(count, total, file_name), 3)
                         self.progress_update.emit(pct)
 
-                # --- Create connections and spawn workers ---
+                # --- Spawn worker threads ---
                 num_workers = min(MAX_SYNC_THREADS, total)
                 self.log_message.emit(
                     "\n <span style='color:#2C93E2'>Starting sync of {} files "
                     "({} threads)...</span> \n".format(total, num_workers), 2)
                 logger.info("Spawning %d sync workers for %d files", num_workers, total)
 
-                worker_connections = []
-                try:
-                    # Create all connections sequentially.
-                    # Reuse coord_p4 as the first worker connection.
-                    worker_connections.append(coord_p4)
-                    for i in range(1, num_workers):
-                        if self._cancel_requested:
-                            break
-                        wp4 = self.create_thread_connection()
-                        worker_connections.append(wp4)
+                workers = []
+                for i in range(num_workers):
+                    if self._cancel_requested:
+                        break
+                    w = threading.Thread(target=worker, daemon=True)
+                    workers.append(w)
+                    w.start()
 
-                    # Attach cancel-aware progress handler to each connection.
-                    # P4 calls progress.update() on the worker's own thread
-                    # during file transfers, so returning 1 safely aborts
-                    # run_sync mid-transfer without cross-thread issues.
-                    for wp4 in worker_connections:
-                        wp4.progress = CancelProgress(
-                            lambda: self._cancel_requested
-                        )
-
-                    # Track connections for cleanup
-                    with self._worker_connections_lock:
-                        self._worker_connections = list(worker_connections)
-
-                    # Spawn worker threads
-                    workers = []
-                    for wp4 in worker_connections:
-                        if self._cancel_requested:
-                            break
-                        w = threading.Thread(target=worker, args=(wp4,), daemon=True)
-                        workers.append(w)
-                        w.start()
-
-                    # Wait for all workers to finish
-                    for w in workers:
-                        w.join()
-
-                finally:
-                    with self._worker_connections_lock:
-                        self._worker_connections = []
-                    for wp4 in worker_connections[1:]:
-                        try:
-                            wp4.disconnect()
-                        except Exception:
-                            pass
+                # Wait for all workers to finish.
+                for w in workers:
+                    w.join()
 
                 # --- Report results ---
                 if self._cancel_requested:
