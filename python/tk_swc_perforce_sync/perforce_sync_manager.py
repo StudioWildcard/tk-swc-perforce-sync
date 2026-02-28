@@ -27,11 +27,41 @@ from sgtk.platform.qt import QtCore
 for name, cls in QtCore.__dict__.items():
     if isinstance(cls, type): globals()[name] = cls
 
+from P4 import Progress as P4Progress
+
 from .utils import local_to_depot
 
 logger = sgtk.platform.get_logger(__name__)
 
 MAX_SYNC_THREADS = 16
+
+
+class CancelProgress(P4Progress):
+    """Minimal P4.Progress handler that cancels run_sync mid-transfer.
+
+    P4Python calls update() periodically on the SAME thread that called
+    run_sync, so checking a flag here is thread-safe. Returning non-zero
+    from update() tells P4 to abort the current operation.
+    """
+
+    def __init__(self, cancel_flag_fn):
+        P4Progress.__init__(self)
+        self._cancel_flag_fn = cancel_flag_fn
+
+    def init(self, type):
+        pass
+
+    def setDescription(self, description, unit):
+        pass
+
+    def setTotal(self, total):
+        pass
+
+    def update(self, position):
+        return 1 if self._cancel_flag_fn() else 0
+
+    def done(self, fail):
+        pass
 
 
 class PerforceSyncManager(QtCore.QObject):
@@ -266,23 +296,20 @@ class PerforceSyncManager(QtCore.QObject):
     def cancel_sync(self):
         """Cancel the current sync operation.
 
-        Sets the cancel flag so workers stop picking new files after
-        their current file completes. Also unblocks any pending clobber
-        prompt wait.
+        Sets the cancel flag which is checked in two places:
+        1. Each worker's while-loop condition (between files)
+        2. CancelProgress.update() callback (during file transfers)
 
-        Workers check _cancel_requested between files and exit cleanly.
-        The coordinator's finally block handles cleanup and emits
-        sync_completed once all workers have stopped.
+        The CancelProgress handler is called by P4 on the worker's own
+        thread during transfers, so returning 1 safely aborts run_sync
+        mid-transfer — even for large files. No cross-thread P4 access.
 
-        Note: We intentionally do NOT disconnect worker P4 connections
-        from the main thread — P4Python's C extension is not thread-safe
-        for concurrent access, and calling p4.disconnect() while a worker
-        is in p4.run_sync() causes a segfault that kills the application.
+        The coordinator's finally block handles connection cleanup and
+        emits sync_completed once all workers have stopped.
         """
         self._cancel_requested = True
         self.log_message.emit(
-            "\n <span style='color:#FFD700'>Cancelling sync — "
-            "finishing current file(s)...</span> \n", 2)
+            "\n <span style='color:#FFD700'>Cancelling sync...</span> \n", 2)
 
         # Unblock coordinator if it's waiting for clobber response.
         self._clobber_response.set()
@@ -468,6 +495,15 @@ class PerforceSyncManager(QtCore.QObject):
                             break
                         wp4 = self.create_thread_connection()
                         worker_connections.append(wp4)
+
+                    # Attach cancel-aware progress handler to each connection.
+                    # P4 calls progress.update() on the worker's own thread
+                    # during file transfers, so returning 1 safely aborts
+                    # run_sync mid-transfer without cross-thread issues.
+                    for wp4 in worker_connections:
+                        wp4.progress = CancelProgress(
+                            lambda: self._cancel_requested
+                        )
 
                     # Track connections for cleanup
                     with self._worker_connections_lock:
