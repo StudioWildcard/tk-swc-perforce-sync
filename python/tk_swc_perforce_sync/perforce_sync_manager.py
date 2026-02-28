@@ -266,28 +266,26 @@ class PerforceSyncManager(QtCore.QObject):
     def cancel_sync(self):
         """Cancel the current sync operation.
 
-        Sets the cancel flag so workers stop picking new files, then
-        disconnects all worker P4 connections to interrupt any in-flight
-        file transfers. Also unblocks any pending clobber prompt wait.
+        Sets the cancel flag so workers stop picking new files after
+        their current file completes. Also unblocks any pending clobber
+        prompt wait.
+
+        Workers check _cancel_requested between files and exit cleanly.
+        The coordinator's finally block handles cleanup and emits
+        sync_completed once all workers have stopped.
+
+        Note: We intentionally do NOT disconnect worker P4 connections
+        from the main thread — P4Python's C extension is not thread-safe
+        for concurrent access, and calling p4.disconnect() while a worker
+        is in p4.run_sync() causes a segfault that kills the application.
         """
         self._cancel_requested = True
         self.log_message.emit(
-            "\n <span style='color:#FFD700'>Cancelling sync...</span> \n", 2)
+            "\n <span style='color:#FFD700'>Cancelling sync — "
+            "finishing current file(s)...</span> \n", 2)
 
         # Unblock coordinator if it's waiting for clobber response.
         self._clobber_response.set()
-
-        # Disconnect all worker connections to interrupt in-flight syncs.
-        with self._worker_connections_lock:
-            for p4 in self._worker_connections:
-                try:
-                    p4.disconnect()
-                except Exception:
-                    pass
-
-        # Reset state and notify UI immediately.
-        self._sync_active.clear()
-        self.sync_completed.emit()
 
     def respond_to_clobber(self, overwrite):
         """Called by the UI after the user responds to the clobber prompt.
@@ -471,7 +469,7 @@ class PerforceSyncManager(QtCore.QObject):
                         wp4 = self.create_thread_connection()
                         worker_connections.append(wp4)
 
-                    # Register connections so cancel_sync() can disconnect them
+                    # Track connections for cleanup
                     with self._worker_connections_lock:
                         self._worker_connections = list(worker_connections)
 
