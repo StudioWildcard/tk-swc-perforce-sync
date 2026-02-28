@@ -463,6 +463,7 @@ class AppDialog(QWidget):
 
         #################################################
         # checkboxes, buttons etc
+        self.ui.show_sub_items.toggled.connect(self._on_show_sub_items_toggled)
         self.ui.sync_files.clicked.connect(self._on_sync_files)
         self.ui.sync_parents.clicked.connect(self._on_sync_parents)
 
@@ -570,8 +571,6 @@ class AppDialog(QWidget):
         self.publish_files_ui = PublishFilesUI(self, self.window())
 
         # Wire buttons that depend on _publish_integration
-        self.ui.fix_selected.clicked.connect(self._publish_integration.on_fix_selected)
-        self.ui.fix_all.clicked.connect(self._publish_integration.on_fix_all)
         self.ui.submit_files.clicked.connect(self._publish_integration._on_submit_files)
 
         #################################################
@@ -1643,6 +1642,14 @@ class AppDialog(QWidget):
         """Compatibility wrapper -- delegates to PublishIntegration."""
         self._publish_integration._show_pending_view_actions(pos)
 
+    def _create_submitted_view_context_menu(self):
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._create_submitted_view_context_menu()
+
+    def _show_submitted_view_actions(self, pos):
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._show_submitted_view_actions(pos)
+
     def _list_files_in_changelist(self, change):
         """Compatibility wrapper -- delegates to PublishIntegration."""
         return self._publish_integration._list_files_in_changelist(change)
@@ -2627,18 +2634,21 @@ class AppDialog(QWidget):
         if not hasattr(self, '_progress_updater'):
             self._progress_updater = ProgressUpdater(self.ui.progress, self)
         self._progress_updater.update_progress.emit(value)
+        # Update status label with file count
+        total = getattr(self, '_sync_total_files', 0)
+        if total > 0:
+            done = int(round(value / 100.0 * total))
+            self._update_sync_status_label(done)
 
     def _on_sync_info(self, file_count, size_str):
         """Called when sync provides file count and size info."""
+        self._sync_total_files = file_count
+        self._sync_size_str = size_str
         if file_count == 0 and size_str:
             # Dry-run in progress
             self.ui.sync_status_label.setText(size_str)
-        elif size_str:
-            self.ui.sync_status_label.setText(
-                "Syncing {} files ({})...".format(file_count, size_str))
         else:
-            self.ui.sync_status_label.setText(
-                "Syncing {} files...".format(file_count))
+            self._update_sync_status_label(0)
         self.ui.sync_status_label.setVisible(True)
         self.ui.cancel_sync.setVisible(True)
         self.ui.cancel_sync.setEnabled(True)
@@ -2648,6 +2658,20 @@ class AppDialog(QWidget):
         self.ui.sync_files.setEnabled(False)
         self.ui.sync_parents.setEnabled(False)
         self.ui.get_latest_button.setEnabled(False)
+
+    def _update_sync_status_label(self, done):
+        """Update the sync status label with current progress.
+
+        Format: '0/150 Files - 2.3 GB' or '0/150 Files' if size unknown.
+        """
+        total = getattr(self, '_sync_total_files', 0)
+        size_str = getattr(self, '_sync_size_str', '')
+        if total > 0 and size_str:
+            self.ui.sync_status_label.setText(
+                "{}/{} Files - {}".format(done, total, size_str))
+        elif total > 0:
+            self.ui.sync_status_label.setText(
+                "{}/{} Files".format(done, total))
 
     def _on_cancel_sync(self):
         """Cancel the current sync operation."""
@@ -3864,6 +3888,12 @@ class AppDialog(QWidget):
 
     #---------------------------------------------------
 
+    def _on_show_sub_items_toggled(self, checked):
+        """Reload publishes when the show-sub-items toggle changes."""
+        selected_item = self._get_selected_entity()
+        if selected_item:
+            self._load_publishes_for_entity_item(selected_item)
+
     def _on_treeview_item_selected(self):
         """
         Slot triggered when someone changes the selection in a treeview.
@@ -4137,9 +4167,11 @@ class AppDialog(QWidget):
         Called after sync operations complete.
         Invalidates cache for the current entity.
         """
-        # Hide sync progress UI and restore determinate mode
+        # Hide sync progress UI and reset state
         self.ui.cancel_sync.setVisible(False)
         self.ui.sync_status_label.setVisible(False)
+        self._sync_total_files = 0
+        self._sync_size_str = ''
         self.ui.progress.setRange(0, 100)
         self.ui.progress.setValue(0)
         self.ui.progress.setVisible(False)

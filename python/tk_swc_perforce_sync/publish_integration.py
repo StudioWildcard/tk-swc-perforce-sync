@@ -398,8 +398,6 @@ class PublishIntegration(QtCore.QObject):
         self._add_log(msg, 2)
         self.ui.sync_files.setEnabled(False)
         self.ui.sync_parents.setEnabled(False)
-        self.ui.fix_selected.setEnabled(False)
-        self.ui.fix_all.setEnabled(False)
         self.ui.submit_files.setEnabled(True)
 
     def update_pending_view(self):
@@ -462,6 +460,37 @@ class PublishIntegration(QtCore.QObject):
         menu.aboutToHide.connect(event_loop.quit)
         menu.exec_(global_pos)
         event_loop.exec_()
+
+    def _create_submitted_view_context_menu(self):
+        """Create context menu actions for the submitted view."""
+        if not self.submitted_tree_view:
+            return
+        widget = self.submitted_tree_view.tree_view
+
+        self._submitted_view_fix_selected_action = QAction("Fix Selected", widget)
+        self._submitted_view_fix_selected_action.triggered.connect(self.on_fix_selected)
+
+        self._submitted_view_fix_all_action = QAction("Fix All Unpublished", widget)
+        self._submitted_view_fix_all_action.triggered.connect(self.on_fix_all)
+
+        widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        widget.customContextMenuRequested.connect(self._show_submitted_view_actions)
+
+    def _show_submitted_view_actions(self, pos):
+        """Shows context menu for submitted view."""
+        if not self.submitted_tree_view:
+            return
+        widget = self.submitted_tree_view.tree_view
+        index = widget.indexAt(pos)
+        if not index.isValid():
+            return
+
+        menu = QMenu(self.parent())
+        menu.addAction(self._submitted_view_fix_selected_action)
+        menu.addAction(self._submitted_view_fix_all_action)
+
+        global_pos = widget.mapToGlobal(pos)
+        menu.exec_(global_pos)
 
     def _on_pending_view_model_action(self, action):
         selected_files_to_revert = []
@@ -743,8 +772,9 @@ class PublishIntegration(QtCore.QObject):
             self.submitted_tree_view.populate_treeview_widget_submitted()
             publish_widget = self.submitted_tree_view.get_treeview_widget()
             self.ui.submitted_scroll.setWidget(publish_widget)
+            self._create_submitted_view_context_menu()
 
-            msg = "\n <span style='color:#2C93E2'>Select files in the Submitted view then click <i>Fix Selected</i> or click <i>Fix All</i> to publish them using the <i>Shotgrid Publisher</i>...</span> \n"
+            msg = "\n <span style='color:#2C93E2'>Select changelists in the Submitted view, then right-click and choose <i>Fix Selected</i> or <i>Fix All Unpublished</i> to publish them using the <i>Shotgrid Publisher</i>...</span> \n"
             self._add_log(msg, 2)
 
     def _reset_submitted_widget(self):

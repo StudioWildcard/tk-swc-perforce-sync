@@ -253,8 +253,6 @@ class ViewManager(QtCore.QObject):
             # Submitted widget population is handled by AppDialog
             self.ui.sync_files.setEnabled(False)
             self.ui.sync_parents.setEnabled(False)
-            self.ui.fix_selected.setEnabled(True)
-            self.ui.fix_all.setEnabled(True)
             self.ui.submit_files.setEnabled(False)
             self.ui.get_latest_button.setEnabled(False)
             self.ui.submit_button.setEnabled(False)
@@ -267,8 +265,6 @@ class ViewManager(QtCore.QObject):
             self.main_view_mode = self.MAIN_VIEW_PENDING
             self.ui.sync_files.setEnabled(False)
             self.ui.sync_parents.setEnabled(False)
-            self.ui.fix_selected.setEnabled(False)
-            self.ui.fix_all.setEnabled(False)
             self.ui.submit_files.setEnabled(True)
             self.ui.get_latest_button.setEnabled(False)
             self.ui.submit_button.setEnabled(True)
@@ -282,8 +278,6 @@ class ViewManager(QtCore.QObject):
         """Sets common button states for list/thumb/column modes."""
         self.ui.sync_files.setEnabled(True)
         self.ui.sync_parents.setEnabled(True)
-        self.ui.fix_selected.setEnabled(False)
-        self.ui.fix_all.setEnabled(False)
         self.ui.submit_files.setEnabled(False)
 
     def _turn_all_modes_off(self):

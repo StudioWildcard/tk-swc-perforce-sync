@@ -82,10 +82,8 @@ class SWCTreeView(QTreeView):
         """
         is_parent = not index.parent().isValid()
         if self.mode == "submitted":
-            if is_parent:
-                self.setSelectionMode(QAbstractItemView.SingleSelection)
-            else:
-                self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+            # Allow multi-select for both parents (changelists) and children (files)
+            self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         elif self.mode == "pending":
             if is_parent:
                 self.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -629,17 +627,29 @@ class TreeViewWidget(QWidget):
 
     def get_selected_publish_items(self):
         data_to_publish = []
+        seen_keys = set()
         selected = self.tree_view.selectionModel().selectedIndexes()
         for index in selected:
-            key = self.model.data(index)
-            if key:
-                if key in self.publish_dict:
-                    sg_item = self.publish_dict.get(key, None)
-                    if sg_item:
-                        data_to_publish.append(sg_item)
+            is_parent = not index.parent().isValid()
+            if is_parent:
+                # Parent (changelist) selected — include all child items
+                source_index = self.proxymodel.mapToSource(index)
+                parent_item = self.model.itemFromIndex(source_index)
+                if parent_item:
+                    for row in range(parent_item.rowCount()):
+                        child = parent_item.child(row)
+                        if child:
+                            key = child.text()
+                            if key and key in self.publish_dict and key not in seen_keys:
+                                seen_keys.add(key)
+                                data_to_publish.append(self.publish_dict[key])
+            else:
+                # Child item (file) — look up directly
+                key = self.model.data(self.proxymodel.mapToSource(index))
+                if key and key in self.publish_dict and key not in seen_keys:
+                    seen_keys.add(key)
+                    data_to_publish.append(self.publish_dict[key])
 
-        #logger.debug("<<<<<<<  self.publish_dict: {}".format(self.publish_dict))
-        #logger.debug("<<<<<<<  data_to_publish: {}".format(data_to_publish))
         return data_to_publish
 
     def get_selected_publish_items_by_action(self):
