@@ -22,12 +22,7 @@ for name, cls in QtGui.__dict__.items():
     if isinstance(cls, type): globals()[name] = cls
 
 import threading
-from .threads import SyncThread, FileSyncThread
-import concurrent.futures
-import subprocess
-import queue
 import re
-import concurrent.futures
 
 
 import datetime
@@ -63,6 +58,10 @@ from .ui.dialog import Ui_Dialog
 from .publish_item import PublishItem
 
 from .publish_files_ui import PublishFilesUI
+from .perforce_sync_manager import PerforceSyncManager
+from .view_manager import ViewManager
+from .publish_integration import PublishIntegration
+from .entity_browser import EntityBrowser
 
 from .perforce_change import create_change, add_to_change, submit_change, submit_and_delete_file, submit_single_file, submit_and_delete_file_list
 from .treeview_widget import TreeViewWidget, SWCTreeView
@@ -163,33 +162,21 @@ class AppDialog(QWidget):
         self._app = sgtk.platform.current_bundle()
         #################################################
         # Perforce Views
-        self.main_view_mode = self.MAIN_VIEW_THUMB
         self.repo_root = os.path.normpath(
             os.path.join(os.path.dirname(__file__), "..", "..")
         )
 
-        active_column_view_image_path = os.path.join(self.repo_root, "icons/mode_switch_column_active.png")
-        self.active_column_view_icon = QIcon(QPixmap(active_column_view_image_path))
-
-        inactive_column_view_image_path = os.path.join(self.repo_root, "icons/mode_switch_column_off.png")
-        self.inactive_column_view_icon = QIcon(QPixmap(inactive_column_view_image_path))
-
-        submitted_image_path = os.path.join(self.repo_root, "icons/mode_switch_submitted_active.png")
-        self.submitted_icon = QIcon(QPixmap(submitted_image_path))
-
-        inactive_submitted_image_path = os.path.join(self.repo_root, "submitted_off.png")
-        self.submitted_icon_inactive = QIcon(QPixmap(inactive_submitted_image_path))
-
-        pending_image_path = os.path.join(self.repo_root, "icons/mode_switch_pending_active.png")
-        self.pending_icon = QIcon(QPixmap(pending_image_path))
-
-        inactive_pending_image_path = os.path.join(self.repo_root, "icons/pending_off.png")
-        self.pending_icon_inactive = QIcon(QPixmap(inactive_pending_image_path))
-
         #################################################
         # Perforce
         self._fw = sgtk.platform.get_framework("tk-framework-perforce")
-        self._p4 = self._fw.connection.connect()
+        # PerforceSyncManager owns the P4 connection and all sync operations.
+        self._sync_manager = PerforceSyncManager(self._app, self._fw, parent=self)
+        self._sync_manager.log_message.connect(self._add_log)
+        self._sync_manager.progress_update.connect(self._update_progress)
+        self._sync_manager.sync_completed.connect(self._after_syncing_operations)
+        # Compatibility alias — other code still references self._p4 directly.
+        # These will be migrated to manager access in subsequent extraction steps.
+        self._p4 = self._sync_manager.p4
         # Entity
         self._entity_path = None
         self._entity_data = None
@@ -213,23 +200,11 @@ class AppDialog(QWidget):
         self._status_model = SgStatusModel(self, self._task_manager)
 
         #################################################
-        # details pane
-        self._details_pane_visible = False
-
-        self._file_details_action_menu = QMenu()
-        self.ui.file_detail_actions_btn.setMenu(self._file_details_action_menu)
-
-        self.ui.info.clicked.connect(self._toggle_details_pane)
+        # details pane, view mode buttons, refresh/submit — wired after ViewManager creation below
 
         self.ui.refresh_button.clicked.connect(self._refresh_all)
         self.ui.get_latest_button.clicked.connect(self._get_latest)
         self.ui.submit_button.clicked.connect(self._submit_pending)
-
-        self.ui.thumbnail_mode.clicked.connect(self._on_thumbnail_mode_clicked)
-        self.ui.list_mode.clicked.connect(self._on_list_mode_clicked)
-        self.ui.column_mode.clicked.connect(self._on_column_mode_clicked)
-        self.ui.submitted_mode.clicked.connect(self._on_submitted_mode_clicked)
-        self.ui.pending_mode.clicked.connect(self._on_pending_mode_clicked)
 
         self.update_pending_view_signal.connect(self.update_pending_view)
         ###########################################
@@ -284,8 +259,7 @@ class AppDialog(QWidget):
         self._no_selection_pixmap = QPixmap(":/res/no_item_selected_512x400.png")
         self._no_pubs_found_icon = QPixmap(":/res/no_publishes_found.png")
 
-        self.ui.file_detail_playback_btn.clicked.connect(self._on_detail_version_playback)
-        self._current_version_detail_playback_url = None
+        # Playback button will be wired to ViewManager after its creation below
 
         # set up right click menu for the main publish view
         self._refresh_file_history_action = QAction("Refresh", self.ui.file_history_view)
@@ -369,13 +343,7 @@ class AppDialog(QWidget):
         self._publish_proxy_model = SgLatestPublishProxyModel(self)
         self._publish_proxy_model.setSourceModel(self._publish_model)
 
-        # whenever the number of columns change in the proxy model
-        # check if we should display the "sorry, no publishes found" overlay
-        self._publish_model.cache_loaded.connect(self._on_publish_content_change)
-        self._publish_model.data_refreshed.connect(self._on_publish_content_change)
-        self._publish_proxy_model.filter_changed.connect(
-            self._on_publish_content_change
-        )
+        # Signal connections for overlay are wired in ViewManager block below
 
         # hook up view -> proxy model -> model
         self.ui.publish_view.setModel(self._publish_proxy_model)
@@ -389,33 +357,69 @@ class AppDialog(QWidget):
             self.ui.publish_view, self._action_manager
         )
 
-        # recall which the most recently mode used was and set that
-        #main_view_mode = self._settings_manager.retrieve(
-        #    "main_view_mode", self.MAIN_VIEW_THUMB
-        #)
-        # self._set_main_view_mode(main_view_mode)
-        self._set_main_view_mode(self.MAIN_VIEW_THUMB)
+        #################################################
+        # ViewManager — owns view mode switching, column view, details pane,
+        # publish view interaction, and filtering.
+        self._view_manager = ViewManager(
+            self._app, self.ui, self._settings_manager, self._action_manager,
+            self._publish_model, self._publish_proxy_model, self._status_model,
+            self._publish_file_history_model, self._publish_type_model,
+            self.actions_icons, self._dynamic_widgets, parent=self
+        )
+        self._view_manager.log_message.connect(self._add_log)
+        self._view_manager.column_view_action_requested.connect(self._on_column_view_action)
+        # Provide delegates and pixmaps to view manager
+        self._view_manager.set_delegates(self._publish_list_delegate, self._publish_thumb_delegate)
+        self._view_manager.set_pixmaps(
+            QPixmap(":/res/no_item_selected_512x400.png"),
+            QPixmap(":/res/multiple_publishes_512x400.png"),
+            QPixmap(":/res/no_publishes_found.png")
+        )
+        self._view_manager.set_publish_main_overlay(self._publish_main_overlay)
+        self._view_manager.set_p4_and_helpers(
+            self._p4, self._create_key, self._convert_local_to_depot
+        )
+        self._view_manager.set_get_entity_path_fn(self._get_entity_path)
+        # Compatibility aliases for code that still references these on self
+        self.main_view_mode = self._view_manager.main_view_mode
+        self.column_view_model = self._view_manager.column_view_model
+        self.perforce_proxy_model = self._view_manager.perforce_proxy_model
 
-        # whenever the type list is checked, update the publish filters
-        self._publish_type_model.itemChanged.connect(
-            self._apply_type_filters_on_publishes
+        # Wire view mode buttons to ViewManager
+        self.ui.info.clicked.connect(self._view_manager.toggle_details_pane)
+        self.ui.thumbnail_mode.clicked.connect(self._view_manager.on_thumbnail_mode_clicked)
+        self.ui.list_mode.clicked.connect(self._view_manager.on_list_mode_clicked)
+        self.ui.column_mode.clicked.connect(self._view_manager.on_column_mode_clicked)
+        self.ui.submitted_mode.clicked.connect(self._on_submitted_mode_clicked)
+        self.ui.pending_mode.clicked.connect(self._on_pending_mode_clicked)
+        self.ui.file_detail_playback_btn.clicked.connect(
+            self._view_manager.on_detail_version_playback
         )
 
-        # if an item in the table is double clicked the default action is run
+        # Set initial view mode
+        self._view_manager.set_main_view_mode(ViewManager.MAIN_VIEW_THUMB)
+
+        # Publish type filter
+        self._publish_type_model.itemChanged.connect(
+            self._view_manager.apply_type_filters_on_publishes
+        )
+
+        # Publish view double-click
         self.ui.publish_view.doubleClicked.connect(self._on_publish_double_clicked)
 
-        # event handler for when the selection in the publish view is changing
-        # note! Because of some GC issues (maya 2012 Pyside), need to first establish
-        # a direct reference to the selection model before we can set up any signal/slots
-        # against it
+        # Publish view selection
         self.ui.publish_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._publish_view_selection_model = self.ui.publish_view.selectionModel()
         self._publish_view_selection_model.selectionChanged.connect(
             self._on_publish_selection
         )
 
-        # set up right click menu for the main publish view
+        # Publish model content change
+        self._publish_model.cache_loaded.connect(self._view_manager.on_publish_content_change)
+        self._publish_model.data_refreshed.connect(self._view_manager.on_publish_content_change)
+        self._publish_proxy_model.filter_changed.connect(self._view_manager.on_publish_content_change)
 
+        # Right click menu for the main publish view
         self._fix_action = QAction("Fix", self.ui.publish_view)
         self._fix_action.triggered.connect(lambda: self._on_publish_model_action("fix"))
 
@@ -425,27 +429,18 @@ class AppDialog(QWidget):
         self._edit_action.triggered.connect(lambda: self._on_publish_model_action("edit"))
         self._delete_action = QAction("Delete", self.ui.publish_view)
         self._delete_action.triggered.connect(lambda: self._on_publish_model_action("delete"))
-        # Add changlist as submenus to the delete action
-
         self._change_lists = QAction("1001", self._delete_action)
         self._change_lists.triggered.connect(lambda: self._on_publish_model_action("1001"))
-
         self._revert_action = QAction("Revert", self.ui.publish_view)
         self._revert_action.triggered.connect(lambda: self._on_publish_model_action("revert"))
-
         self._sync_action = QAction("Sync", self.ui.publish_view)
         self._sync_action.triggered.connect(lambda: self._on_publish_model_action("sync"))
-
-        # Correctly connect the triggered signal to the slot
         self._preview_create_folders_action = QAction("Preview Create Folders", self.ui.publish_view)
         self._preview_create_folders_action.triggered.connect(lambda: self._on_publish_folder_action("preview"))
-
         self._create_folders_action = QAction("Create Folders", self.ui.publish_view)
         self._create_folders_action.triggered.connect(lambda: self._on_publish_folder_action("create"))
-
         self._unregister_folders_action = QAction("Unregister Folders", self.ui.publish_view)
         self._unregister_folders_action.triggered.connect(lambda: self._on_publish_folder_action("unregister"))
-
         self._refresh_action = QAction("Refresh", self.ui.publish_view)
         self._refresh_action.triggered.connect(self._publish_model.async_refresh)
 
@@ -456,57 +451,30 @@ class AppDialog(QWidget):
 
         #################################################
         # popdown publish filter widget for the main view
-        # note:
-        # we parent the widget to a frame that flows around the
-        # main publish area - this is in order to avoid a scenario
-        # where the overlay that sometimes pops up on top of the
-        # publish area and the search widget would be competing
-        # for the same z-index. The result in some of these cases
-        # is that the search widget is hidden under the "publishes
-        # not found" overlay. By having it parented to the frame
-        # instead, it will always be above the overlay.
         self._search_widget = SearchWidget(self.ui.publish_frame)
-        # hook it up with the search button the main toolbar
-        self.ui.search_publishes.clicked.connect(self._on_publish_filter_clicked)
-        # hook it up so that it signals the publish proxy model whenever the filter changes
+        self._view_manager.set_search_widget(self._search_widget)
+        self.ui.search_publishes.clicked.connect(self._view_manager.on_publish_filter_clicked)
         self._search_widget.filter_changed.connect(
             self._publish_proxy_model.set_search_query
         )
         self._search_widget.filter_changed.connect(
-            self._on_column_view_set_search_query
+            self._view_manager.on_column_view_set_search_query
         )
-        self._column_view_search_filter = None
 
         #################################################
         # checkboxes, buttons etc
-        self.ui.fix_selected.clicked.connect(self._on_fix_selected)
-        self.ui.fix_all.clicked.connect(self._on_fix_all)
         self.ui.sync_files.clicked.connect(self._on_sync_files)
         self.ui.sync_parents.clicked.connect(self._on_sync_parents)
-        self.ui.submit_files.clicked.connect(self._on_submit_files)
-        # self.ui.show_sub_items.toggled.connect(self._on_show_subitems_toggled)
 
         self.ui.check_all.clicked.connect(self._publish_type_model.select_all)
         self.ui.check_none.clicked.connect(self._publish_type_model.select_none)
-        # self.ui.sync_entity_files.clicked.connect(self._on_sync_entity_files)
-
 
         #################################################
         # thumb scaling
         scale_val = self._settings_manager.retrieve("thumb_size_scale", 140)
-        # position both slider and view
         self.ui.thumb_scale.setValue(scale_val)
         self.ui.publish_view.setIconSize(QSize(scale_val, scale_val))
-        # and track subsequent changes
-        self.ui.thumb_scale.valueChanged.connect(self._on_thumb_size_slider_change)
-
-        #################################################
-        #Table view setup
-        self._headers = ["", "Folder", "Action", "Name", "Revision#", "Size(MB)", "Extension", "Type",
-                         "User", "Task", "Status", "Step", "Date/Time", "Date Modified", "ID",
-                         "Description"]
-        self._setup_column_view()
-        self._current_column_view_grouping = self.COLUMN_VIEW_UNGROUP
+        self.ui.thumb_scale.valueChanged.connect(self._view_manager.on_thumb_size_slider_change)
 
         #################################################
         # setup file_history
@@ -572,21 +540,47 @@ class AppDialog(QWidget):
         # Sync
         self._files_to_sync = []
         #################################################
-        # Publishing
-        self._home_dir = None
-        self._publish_files_path = None
-        self._publish_files_description = None
-        self._create_publisher_dir()
-        self._sg_data = []
-
-        self._submitted_data_to_publish = []
-        self._pending_data_to_publish = []
-        self._fstat_dict = {}
-        self._action_data_to_publish = []
+        # PublishIntegration — owns publishing workflows, pending/submitted views,
+        # changelist operations, CLI submission, fix operations.
+        self._publish_integration = PublishIntegration(
+            self._app, self.ui, self._sync_manager, parent=self
+        )
+        self._publish_integration.log_message.connect(self._add_log)
+        self._publish_integration.set_publish_model(self._publish_model, SgLatestPublishModel)
+        self._publish_integration.set_callbacks(
+            get_selected_entity_fn=self._get_selected_entity,
+            load_publishes_for_entity_item_fn=self._load_publishes_for_entity_item,
+            get_entity_info_fn=self._get_entity_info,
+            create_key_fn=self._create_key,
+            convert_local_to_depot_fn=self._convert_local_to_depot,
+            add_log_fn=self._add_log,
+            reload_treeview_fn=lambda: self._reload_treeview(),
+            on_treeview_item_selected_fn=lambda: self._on_treeview_item_selected(),
+            setup_file_details_panel_fn=lambda items: self._setup_file_details_panel(items),
+            do_sync_files_fn=lambda files: self._do_sync_files_threading_thread_2(files),
+            refresh_publish_data_fn=lambda: self.refresh_publish_data(),
+        )
+        # Compatibility aliases
+        self._sg_data = self._publish_integration._sg_data
+        self._fstat_dict = self._publish_integration._fstat_dict
+        self._change_dict = self._publish_integration._change_dict
+        self._submitted_data_to_publish = self._publish_integration._submitted_data_to_publish
+        self._pending_data_to_publish = self._publish_integration._pending_data_to_publish
+        self._action_data_to_publish = self._publish_integration._action_data_to_publish
         self.publish_files_ui = PublishFilesUI(self, self.window())
-        self._submitted_publish_list = []
-        self._pending_publish_list = []
-        self._change_dict = {}
+
+        # Wire buttons that depend on _publish_integration
+        self.ui.fix_selected.clicked.connect(self._publish_integration.on_fix_selected)
+        self.ui.fix_all.clicked.connect(self._publish_integration.on_fix_all)
+        self.ui.submit_files.clicked.connect(self._publish_integration._on_submit_files)
+
+        #################################################
+        # EntityBrowser — owns entity detail panels, parent/children,
+        # breadcrumbs, entity path resolution, filesystem operations.
+        self._entity_browser = EntityBrowser(
+            self._app, self.ui, self._sync_manager, parent=self
+        )
+        self._entity_browser.log_message.connect(self._add_log)
 
                 #################################################
         self._root_path = self._app.sgtk.roots.get('primary', None)
@@ -640,11 +634,6 @@ class AppDialog(QWidget):
         logger.debug(
             f"Scheduled a delayed call to refresh_entity_preset_tabs in {initial_refresh_delay_ms / 1000} seconds."
         )
-        #################################################
-        # Add sync count cache
-        self._sync_count_cache = {}
-        self._sync_count_cache_timeout = 60  # seconds
-        self._sync_count_cache_lock = threading.Lock()  # Thread safety for cache
         #################################################
 
     def _set_logger(self):
@@ -964,309 +953,45 @@ class AppDialog(QWidget):
     ########################################################################################
     # info bar related
     def _get_default_change(self):
-
-        max_retries = 3
-        default_changelist = None
-        try:
-            for attempt in range(max_retries):
-                default_changelist = self._p4.fetch_change()
-                if not default_changelist:
-                    time.sleep(0.5)
-                    continue
-                else:
-                    break
-
-        except:
-            pass
-        return default_changelist
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_default_change()
 
     def _get_default_changelists(self):
-
-        key = "default"
-        self._change_dict[key] = []
-        # default_changelist = self._p4.fetch_change()
-        default_changelist = self._get_default_change()
-        if not default_changelist:
-            logger.debug("<<<<<<<  Unable to get default changelist")
-            return
-
-        sg_item = {}
-        sg_item['changeListInfo'] = True
-        sg_item['headTime'] = default_changelist.get('time', None)
-        sg_item['p4_user'] = default_changelist.get('User', None)
-        description = default_changelist.get('Description', None)
-        if not description or "description" in description:
-            description = "Default Changelist"
-        sg_item['description'] = description
-        self._change_dict[key].append(sg_item)
-
-        # logger.debug("<<<<<<<  default_changelist: {}".format(default_changelist))
-        if default_changelist:
-            depot_files = default_changelist.get('Files', None)
-            if depot_files:
-                for depot_file in depot_files:
-                    if depot_file:
-
-
-                        fstat_list = self._p4.run("fstat", depot_file)
-                        if fstat_list:
-                            sg_item = fstat_list[0]
-                            sg_item['description'] = default_changelist.get("Description", None)
-                            sg_item['p4_user'] = default_changelist.get('User', None)
-                            sg_item['client'] = default_changelist.get('client', None)
-                            sg_item['time'] = default_changelist.get('time', None)
-                            file_path = sg_item.get("clientFile", None)
-                            if file_path:
-                                sg_item["path"] = {}
-                                sg_item["path"]["local_path"] = file_path
-                            have_rev = sg_item.get('haveRev', "0")
-                            head_rev = sg_item.get('headRev', "0")
-                            if not have_rev or have_rev == "none":
-                                have_rev = "0"
-                            sg_item["revision"] = "#{}/{}".format(have_rev, head_rev)
-                            sg_item["action"] = sg_item.get("action", None) or sg_item.get("headAction", None)
-
-                            p4_status = self._get_action(sg_item)
-
-                            self._change_dict[key].append(sg_item)
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._get_default_changelists()
+        self._change_dict = self._publish_integration._change_dict
 
     def get_client_name(self):
-        max_retries = 5
-        client = None
-        try:
-            for attempt in range(max_retries):
-                client = self._p4.fetch_client()
-                if not client:
-                    time.sleep(0.3)
-                    continue
-                else:
-                    break
-        except:
-            pass
-        return client
+        return self._sync_manager.get_client_name()
 
     def get_change_lists(self, workspace):
-        max_retries = 5
-        change_lists = None
-        try:
-            for attempt in range(max_retries):
-                change_lists = self._p4.run_changes("-l", "-s", "pending", "-c", workspace)
-                if not change_lists:
-                    time.sleep(0.3)
-                    continue
-                else:
-                    break
-        except:
-            pass
-        return change_lists
+        return self._sync_manager.get_change_lists(workspace)
 
     def get_desc_files(self, key):
-        max_retries = 3
-        desc_files = None
-        try:
-            for attempt in range(max_retries):
-                desc_files = self._p4.run("describe", "-O", key)
-                if not desc_files:
-                    time.sleep(0.3)
-                    continue
-                else:
-                    break
-        except:
-            pass
-        return desc_files
+        return self._sync_manager.get_desc_files(key)
 
     def get_fstat_list(self, depot_file):
-        max_retries = 3
-        fstat_list = None
-        try:
-            for attempt in range(max_retries):
-                fstat_list = self._p4.run("fstat", depot_file)
-                if not fstat_list:
-                    time.sleep(0.3)
-                    continue
-                else:
-                    break
-        except:
-            pass
-        return fstat_list
+        return self._sync_manager.get_fstat_list(depot_file)
 
     def _get_pending_changelists(self):
-
-        client = self.get_client_name()
-        if not client:
-            logger.debug("<<<<<<<  Unable to get client")
-            return
-
-        workspace = client.get("Client", None)
-        # Get the pending changelists
-        change_lists = self.get_change_lists(workspace)
-        # change_lists = self._p4.run_changes("-l", "-s", "pending", "-c", workspace)
-        # logger.debug("<<<<<<<  change_lists: {}".format(change_lists))
-        if not change_lists:
-            logger.debug("<<<<<<<  Unable to get pending changelists")
-            return
-
-
-        for change_list in change_lists:
-            key = change_list.get("change", None)
-            #logger.debug("{}".format(key))
-            # desc_files = self._p4.run("describe", "-O", key)
-            desc_files = self.get_desc_files(key)
-
-            # logger.debug(">>>> desc_files: {}".format(depot_file))
-            if desc_files:
-
-                for desc in desc_files:
-                    # logger.debug(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> desc_file: {}".format(desc))
-                    depot_files = desc.get('depotFile', None)
-
-                    if depot_files:
-                        if key not in self._change_dict:
-                            self._change_dict[key] = []
-                        sg_item = {}
-                        sg_item['changeListInfo'] = True
-                        sg_item['headTime'] = change_list.get('time', None)
-                        sg_item['p4_user'] = change_list.get('user', None)
-                        sg_item['description'] = change_list.get('desc', None)
-                        sg_item['client'] = change_list.get('client', None)
-                        sg_item['time'] = change_list.get('time', None)
-                        # Add info sg_item
-                        self._change_dict[key].append(sg_item)
-
-                        files_rev = desc.get('rev', None)
-                        files_action = desc.get('action', None)
-                        change_file_info = zip(depot_files, files_rev, files_action)
-
-                        for depot_file, rev, action in change_file_info:
-                            if depot_file:
-                                # fstat_list = self._p4.run("fstat", depot_file)
-                                fstat_list = self.get_fstat_list(depot_file)
-                                if fstat_list:
-                                    fstat = fstat_list[0]
-                                    client_file = self._get_client_file(depot_file)
-                                    if client_file:
-                                        sg_item = {}
-                                        sg_item["depotFile"] = depot_file
-                                        sg_item["path"] = {}
-                                        sg_item["path"]["local_path"] = client_file
-                                        sg_item["headRev"] = fstat.get("headRev", "0")
-                                        sg_item["haveRev"] = fstat.get("haveRev", "0")
-                                        if not sg_item["haveRev"] or sg_item["haveRev"] == "none":
-                                            sg_item["haveRev"] = "0"
-                                        sg_item["revision"] = "#{}/{}".format(sg_item["haveRev"], sg_item["headRev"])
-                                        sg_item["action"] = action
-                                        sg_item["headChange"] = key
-                                        self._change_dict[key].append(sg_item)
-
-
-            #logger.debug("key {}:{}".format(key, self._change_dict[key]))
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._get_pending_changelists()
+        self._change_dict = self._publish_integration._change_dict
 
     def _get_client_file(self, depot_file):
-        """
-        Convert depot path to local path
-        For example, convert:
-        "//Ark2Depot/Content/Base/Characters/Human/Survivor/Armor/Cloth_T3/_ven/MDL/Survivor_M_Armor_Cloth_T3_MDL.fbx"
-        to:
-        'B:\Ark2Depot\Content\Base\Characters\Human\Survivor\Armor\Cloth_T3\_ven\MDL\Survivor_M_Armor_Cloth_T3_MDL.fbx'
-        """
-        client_file = None
-        try:
-            if depot_file:
-                #depot_file.replace("//", "\\")
-                #depot_file.replace("/", "\\")
-                client_file = "{}{}".format(self._drive, depot_file)
-        except:
-            pass
-        return client_file
+        return self._sync_manager.get_client_file(depot_file)
 
     def _get_pending_publish_data(self):
-        if self._pending_publish_list:
-            for publish_item in self._pending_publish_list:
-                if publish_item:
-                    sg_item = publish_item[0]
-                    # is_published = sg_item.get("Published", None)
-                    # if not is_published:
-                    publish_checkbox = publish_item[2]
-                    if publish_checkbox.isChecked():
-                        self._pending_data_to_publish.append(sg_item)
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._get_pending_publish_data()
 
     def _get_submitted_publish_data(self):
-        if self._submitted_publish_list:
-            for publish_item in self._submitted_publish_list:
-                if publish_item:
-                    sg_item = publish_item[0]
-                    is_published = sg_item.get("Published", None)
-                    if not is_published:
-                        publish_checkbox = publish_item[2]
-                        if publish_checkbox.isChecked():
-                            self._submitted_data_to_publish.append(sg_item)
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._get_submitted_publish_data()
 
     def _create_perforce_ui(self, data_dict, sorted=None):
-        # publish list
-        publish_widget = QWidget()
-        publish_layout = QVBoxLayout()
-
-        publish_list = self._create_publish_layout(data_dict, sorted)
-
-        current_publish = ''
-        for publish_item in publish_list:
-            if publish_item:
-                if publish_item[3] != current_publish:
-                    sg_item = publish_item[0]
-                    info_layout = QHBoxLayout()
-                    info_layout.layout().setContentsMargins(0, 15, 0, 5)
-
-                    change_label = QLabel()
-                    change_label.setMinimumWidth(120)
-                    change_label.setMaximumWidth(120)
-                    change_txt = self._get_change_list_info(sg_item)
-                    change_label.setText(change_txt)
-
-                    publish_time_label = QLabel()
-                    publish_time_label.setMinimumWidth(200)
-                    publish_time_label.setMaximumWidth(200)
-                    publish_time_txt = self._get_publish_time_info(sg_item)
-                    publish_time_label.setText(publish_time_txt)
-
-                    user_name_label = QLabel()
-                    user_name_label.setMinimumWidth(150)
-                    user_name_label.setMaximumWidth(150)
-                    user_name_txt = self._get_user_name_info(sg_item)
-                    user_name_label.setText(user_name_txt)
-
-                    description_label = QLabel()
-                    description_label.setMinimumWidth(400)
-                    description_label.setMaximumWidth(2000)
-                    description_txt = self._get_description_info(sg_item)
-                    description_label.setText(description_txt)
-
-                    info_layout.addWidget(change_label)
-                    info_layout.addWidget(publish_time_label)
-                    info_layout.addWidget(user_name_label)
-                    info_layout.addWidget(description_label)
-                    #logger.debug("<<<<<<<  sg_item is: {}".format(sg_item))
-
-                    is_published = sg_item.get("Published", None)
-                    #logger.debug("<<<<<<<  sg_item published is: {}".format(is_published))
-                    if is_published:
-                        info_layout.setEnabled(False)
-                    publish_layout.addLayout(info_layout)
-
-                    current_publish = publish_item[3]
-            publish_layout.addLayout(publish_item[1])
-        publish_widget.setLayout(publish_layout)
-
-        for publish in publish_list:
-            if publish:
-                publish_layout.addLayout(publish[1])
-        publish_widget.setLayout(publish_layout)
-
-
-        return publish_widget, publish_list
-        # Submitted Scroll Area
-        # self.ui.submitted_scroll.setWidget(publish_widget)
-        #self.ui.submitted_scroll.setVisible(True)
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._create_perforce_ui(data_dict, sorted)
 
     def _setup_column_view_model(self, root):
         """
@@ -1301,168 +1026,40 @@ class AppDialog(QWidget):
         return (model, proxy_model)
 
     def _create_publish_layout(self, data_dict, sorted):
-        publish_list = []
-        if not sorted:
-            node_dictionary = self._get_change_dictionary(data_dict)
-        else:
-            node_dictionary = data_dict
-        #logger.debug("<<<<<<<  node_dictionary: {}".format(node_dictionary))
-        for key in node_dictionary.keys():
-            if key:
-                # logger.debug("<<<<<<<  key: {}".format(key))
-                publish_label = QLabel()
-                publish_label.setText(str(key))
-                for sg_item in node_dictionary[key]:
-                    if sg_item:
-                        # logger.debug("<<<<<<<  sg_item: {}".format(sg_item))
-                        # depot_path = self._get_depot_path(sg_item)
-                        depot_path = sg_item.get("depotFile", None)
-                        is_published = sg_item.get("Published", None)
-
-                        action = self._get_action(sg_item)
-
-                        publish_layout = QHBoxLayout()
-                        publish_checkbox = QCheckBox()
-                        if is_published:
-                            publish_checkbox.setChecked(True)
-
-                        action_line_edit = QLineEdit()
-                        action_line_edit.setMinimumWidth(80)
-                        action_line_edit.setMaximumWidth(80)
-                        action_line_edit.setText('{}'.format(action))
-                        # action_line_edit.setEnabled(False)
-
-                        publish_path_line_edit = QLineEdit()
-                        publish_path_line_edit.setMinimumWidth(750)
-                        publish_path_line_edit.setText('{}'.format(depot_path))
-                        # publish_path_line_edit.setEnabled(False)
-
-                        publish_layout.addWidget(publish_checkbox)
-                        publish_layout.addWidget(action_line_edit)
-                        publish_layout.addWidget(publish_path_line_edit)
-
-                        if is_published:
-                            publish_checkbox.setEnabled(False)
-                            action_line_edit.setEnabled(False)
-                            publish_path_line_edit.setEnabled(False)
-                        else:
-                            msg = "<span style='color:#2C93E2'>Check files in the Pending view then click <i>Submit Files</i>to publish them using the <i>Shotgrid Publisher</i>...</span>"
-                            publish_checkbox.setToolTip(msg)
-                            publish_path_line_edit.setToolTip(msg)
-
-
-                        publish_list.append((sg_item, publish_layout, publish_checkbox, key))
-        return publish_list
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._create_publish_layout(data_dict, sorted)
 
     def _get_change_list_info(self, sg_item):
-        """
-        Get change list info
-        """
-        change_txt = ""
-        change_list = sg_item.get("change", None)
-        if not change_list:
-            change_list = sg_item.get("headChange", None)
-        if change_list:
-            change_txt += "<span style='color:#2C93E2'><B>Change List: </B></span>"
-            change_txt += "<span><B>{}   </B></span> ".format(change_list)
-            # change_txt += "   \t"
-        return change_txt
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_change_list_info(sg_item)
 
     def _get_publish_time_info(self, sg_item):
-        publish_time_txt = ""
-
-        publish_time = self._get_publish_time(sg_item)
-        if publish_time:
-            publish_time_txt += "<span style='color:#2C93E2'><B>Creation Time: </B></span>"
-            publish_time_txt += "<span><B>{}   </B></span>".format(publish_time)
-        return publish_time_txt
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_publish_time_info(sg_item)
 
     def _get_user_name_info(self, sg_item):
-        user_name_txt = ""
-
-        user_name = self._get_publish_user(sg_item)
-        if user_name:
-            user_name_txt += "<span style='color:#2C93E2'><B>User: </B></span>"
-            user_name_txt += "<span><B>{}   </B></span>\t\t".format(user_name)
-        return user_name_txt
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_user_name_info(sg_item)
 
     def _get_description_info(self, sg_item):
-        description_txt = ""
-
-        description = sg_item.get("description", None)
-        if description:
-            description_txt += "<span style='color:#2C93E2'><B>Description: </B></span>"
-            description_txt += "<span><B>{}</B></span>\t\t".format(description)
-
-        return description_txt
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_description_info(sg_item)
 
     def _get_publish_time(self, sg_item):
-        publish_time= None
-        dt = sg_item.get("headTime", None)
-        # logger.debug(">>>>> dt is: {}".format(dt))
-        if dt:
-            publish_time = create_publish_timestamp(dt)
-        return publish_time
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_publish_time(sg_item)
 
     def _get_publish_user(self, sg_item):
-        publish_user, user_name = None, None
-
-        p4_user = sg_item.get("p4_user", None)
-        if p4_user:
-            publish_user = self._app.shotgun.find_one('HumanUser',
-                                              [['sg_p4_user', 'is', p4_user]],
-                                              ["id", "type", "email", "login", "name", "image"])
-        # logger.debug(">>> Publish user is: {}".format(publish_user))
-        if not publish_user:
-            action_owner = sg_item.get("actionOwner", None)
-            if action_owner:
-                publish_user = self._app.shotgun.find_one('HumanUser',
-                                                     [['sg_p4_user', 'is', action_owner]],
-                                                     ["id", "type", "email", "login", "name", "image"])
-        # logger.debug(">>>> Publish user is: {}".format(publish_user))
-        if not publish_user:
-            publish_user = login.get_current_user(self._app.sgtk)
-
-        # logger.debug(">>>>> Publish user is: {}".format(publish_user))
-        if publish_user:
-            user_name = publish_user.get("name", None)
-
-        return user_name
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_publish_user(sg_item)
 
     def _get_change_dictionary(self, data_dict):
-        """
-        Creates dictionary for every changelist and all its depot files
-        key: changelist number
-        value: sorted list of depotfiles
-        :return: dictionary
-        """
-        change_dict = {}
-
-        if data_dict:
-            for sg_item in data_dict.values():
-                if sg_item:
-                    key = sg_item.get("headChange", None)
-                    if key:
-                        if key not in change_dict:
-                            change_dict[key] = []
-                        change_dict[key].append(sg_item)
-
-        change_dict_sorted = OrderedDict(sorted(change_dict.items()))
-
-        # for key in change_dict_sorted:
-        #   change_dict_sorted[key] = sorted(change_dict_sorted[key])
-        # print(change_dict_sorted)
-        return change_dict_sorted
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_change_dictionary(data_dict)
 
     def _get_action(self, sg_item):
-        """
-        Get action
-        """
-        action = sg_item.get("action", None)
-        if not action:
-            action = sg_item.get("headAction", None)
-        return action
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_action(sg_item)
 
     def _on_file_history_selection(self, selected, deselected):
         """
@@ -1499,278 +1096,38 @@ class AppDialog(QWidget):
         if default_action:
             default_action.trigger()
 
-    def _on_column_view_set_search_query(self, search_filter):
-        # Chech if we are in Column view mode
-        if self.main_view_mode == self.MAIN_VIEW_COLUMN:
-            logger.debug("search_filter: {}".format(search_filter))
-            if len(search_filter) > 1:
-                self._column_view_search_filter = search_filter
-            else:
-                self._column_view_search_filter = None
-            self._set_column_group()
+    # _on_column_view_set_search_query and _on_publish_filter_clicked
+    # are now wired directly to ViewManager in __init__
 
-    def _on_publish_filter_clicked(self):
-        """
-        Executed when someone clicks the filter button in the main UI
-        """
-        if self.ui.search_publishes.isChecked():
-            self.ui.search_publishes.setIcon(
-                QIcon(QPixmap(":/res/search_active.png"))
-            )
-            self._search_widget.enable()
-            # Chech if we are in Column view mode
-            if self.main_view_mode == self.MAIN_VIEW_COLUMN:
-                # log search string from self.ui.search_publishes
-                logger.debug("Column view mode, search is active")
-        else:
-            self.ui.search_publishes.setIcon(
-                QIcon(QPixmap(":/res/search.png"))
-            )
-            self._search_widget.disable()
-            if self.main_view_mode == self.MAIN_VIEW_COLUMN:
-                # log search string from self.ui.search_publishes
-                logger.debug("Column view mode, search is disabled")
-                self._column_view_search_filter = None
-                self._set_column_group()
-
-
-    def _on_thumbnail_mode_clicked(self):
-        """
-        Executed when someone clicks the thumbnail mode button
-        """
-        self._set_main_view_mode(self.MAIN_VIEW_THUMB)
-
-    def _on_list_mode_clicked(self):
-        """
-        Executed when someone clicks the list mode button
-        """
-        self._set_main_view_mode(self.MAIN_VIEW_LIST)
-
-    def _on_column_mode_clicked(self):
-        """
-        Executed when someone clicks the column mode button
-        """
-        self._set_main_view_mode(self.MAIN_VIEW_COLUMN)
 
     def _on_submitted_mode_clicked(self):
-        """
-        Executed when someone clicks the submitted mode button
-        """
-        self._set_main_view_mode(self.MAIN_VIEW_SUBMITTED)
+        """Handles submitted mode: sets view mode then populates widget."""
+        self._view_manager.set_main_view_mode(ViewManager.MAIN_VIEW_SUBMITTED)
+        self.main_view_mode = self._view_manager.main_view_mode
+        self._populate_submitted_widget()
 
     def _on_pending_mode_clicked(self):
-        """
-        Executed when someone clicks the pending mode button
-        """
-        self._set_main_view_mode(self.MAIN_VIEW_PENDING)
+        """Handles pending mode: sets view mode then populates widget."""
+        self._view_manager.set_main_view_mode(ViewManager.MAIN_VIEW_PENDING)
+        self.main_view_mode = self._view_manager.main_view_mode
+        self._populate_pending_widget()
 
     def _set_main_view_mode(self, mode):
-        """
-        Sets up the view mode for the main view.
-
-        :param mode: either MAIN_VIEW_LIST or MAIN_VIEW_THUMB
-        """
-        if mode == self.MAIN_VIEW_LIST:
-            self._turn_all_modes_off()
-            self.ui.publish_view.setVisible(True)
-            self.ui.list_mode.setIcon(
-                QIcon(QPixmap(":/res/mode_switch_card_active.png"))
-            )
-            self.ui.list_mode.setChecked(True)
-            self.ui.thumbnail_mode.setIcon(
-                QIcon(QPixmap(":/res/mode_switch_thumb.png"))
-            )
-
-            self.ui.publish_view.setViewMode(QListView.ListMode)
-            self.ui.publish_view.setItemDelegate(self._publish_list_delegate)
-            self.main_view_mode = self.MAIN_VIEW_LIST
-            self.ui.sync_files.setEnabled(True)
-            self.ui.sync_parents.setEnabled(True)
-            self.ui.fix_selected.setEnabled(False)
-            self.ui.fix_all.setEnabled(False)
-            self.ui.submit_files.setEnabled(False)
-            self.ui.get_latest_button.setEnabled(True)
-            self.ui.submit_button.setEnabled(False)
-
-        elif mode == self.MAIN_VIEW_THUMB:
-            self._turn_all_modes_off()
-            self.ui.publish_view.setVisible(True)
-
-            self.ui.list_mode.setIcon(
-                QIcon(QPixmap(":/res/mode_switch_card.png"))
-            )
-
-            self.ui.thumbnail_mode.setIcon(
-                QIcon(QPixmap(":/res/mode_switch_thumb_active.png"))
-            )
-            self.ui.thumbnail_mode.setChecked(True)
-            self.ui.publish_view.setViewMode(QListView.IconMode)
-            self.ui.publish_view.setItemDelegate(self._publish_thumb_delegate)
-            self._show_thumb_scale(True)
-            self.main_view_mode = self.MAIN_VIEW_THUMB
-            self.ui.sync_files.setEnabled(True)
-            self.ui.sync_parents.setEnabled(True)
-            self.ui.fix_selected.setEnabled(False)
-            self.ui.fix_all.setEnabled(False)
-            self.ui.submit_files.setEnabled(False)
-            self.ui.get_latest_button.setEnabled(True)
-            self.ui.submit_button.setEnabled(False)
-
-        elif mode == self.MAIN_VIEW_COLUMN:
-            self._turn_all_modes_off()
-            self.ui.column_view.setVisible(True)
-            self.ui.column_mode.setIcon(self.active_column_view_icon)
-
-            self.ui.column_mode.setChecked(True)
-
-            self.main_view_mode = self.MAIN_VIEW_COLUMN
-            self.ui.publish_view.setItemDelegate(self._publish_list_delegate)
-            self._populate_column_view_widget()
-            self.ui.sync_files.setEnabled(True)
-            self.ui.sync_parents.setEnabled(True)
-            self.ui.fix_selected.setEnabled(False)
-            self.ui.fix_all.setEnabled(False)
-            self.ui.submit_files.setEnabled(False)
-
-            self.ui.get_latest_button.setEnabled(True)
-            self.ui.submit_button.setEnabled(False)
-
-        elif mode == self.MAIN_VIEW_SUBMITTED:
-            self._turn_all_modes_off()
-            self.ui.submitted_scroll.setVisible(True)
-
-            self.ui.submitted_mode.setIcon(self.submitted_icon)
-            self.ui.submitted_mode.setChecked(True)
-
-            self.main_view_mode = self.MAIN_VIEW_SUBMITTED
+        """Compatibility wrapper — delegates to ViewManager."""
+        self._view_manager.set_main_view_mode(mode)
+        self.main_view_mode = self._view_manager.main_view_mode
+        # For submitted/pending, also populate the widget
+        if mode == self.MAIN_VIEW_SUBMITTED:
             self._populate_submitted_widget()
-            self.ui.sync_files.setEnabled(False)
-            self.ui.sync_parents.setEnabled(False)
-            self.ui.fix_selected.setEnabled(True)
-            self.ui.fix_all.setEnabled(True)
-            self.ui.submit_files.setEnabled(False)
-            self.ui.get_latest_button.setEnabled(False)
-            self.ui.submit_button.setEnabled(False)
-
         elif mode == self.MAIN_VIEW_PENDING:
             self._populate_pending_widget()
-            self.ui.sync_files.setEnabled(False)
-            self.ui.sync_parents.setEnabled(False)
-            self.ui.fix_selected.setEnabled(False)
-            self.ui.fix_all.setEnabled(False)
-            self.ui.submit_files.setEnabled(True)
-            self.ui.get_latest_button.setEnabled(False)
-            self.ui.submit_button.setEnabled(True)
-        else:
-            raise TankError("Undefined view mode!")
-
-        self.ui.publish_view.selectionModel().clear()
-        self._settings_manager.store("main_view_mode", mode)
-
-    def _set_thump_view_mode(self):
-        self._turn_all_modes_off()
-        self.ui.publish_view.setVisible(True)
-
-        self.ui.list_mode.setIcon(
-            QIcon(QPixmap(":/res/mode_switch_card.png"))
-        )
-
-        self.ui.thumbnail_mode.setIcon(
-            QIcon(QPixmap(":/res/mode_switch_thumb_active.png"))
-        )
-        self.ui.thumbnail_mode.setChecked(True)
-        self.ui.publish_view.setViewMode(QListView.IconMode)
-        self.ui.publish_view.setItemDelegate(self._publish_thumb_delegate)
-        self._show_thumb_scale(True)
-        self.main_view_mode = self.MAIN_VIEW_THUMB
-        self.ui.sync_files.setEnabled(True)
-        self.ui.sync_parents.setEnabled(True)
-        self.ui.fix_selected.setEnabled(False)
-        self.ui.fix_all.setEnabled(False)
-        self.ui.submit_files.setEnabled(False)
-
-    def _set_column_view_mode(self):
-        self._turn_all_modes_off()
-        self.ui.column_view.setVisible(True)
-        # self.ui.perforce_scroll.setVisible(True)
-        self.ui.column_mode.setIcon(self.active_column_view_icon)
-        self.ui.column_mode.setChecked(True)
-
-        self.main_view_mode = self.MAIN_VIEW_COLUMN
-        self.ui.publish_view.setItemDelegate(self._publish_list_delegate)
-        self._populate_column_view_widget()
-        self.ui.sync_files.setEnabled(True)
-        self.ui.sync_parents.setEnabled(True)
-        self.ui.fix_selected.setEnabled(False)
-        self.ui.fix_all.setEnabled(False)
-        self.ui.submit_files.setEnabled(False)
 
     def _populate_pending_widget(self):
-        msg = "\n <span style='color:#2C93E2'>Populating the pending view. Please wait...</span> \n"
-        self._add_log(msg, 2)
-        self._turn_all_modes_off()
-        self.ui.pending_scroll.setVisible(True)
-        self.ui.pending_mode.setIcon(self.pending_icon)
-        # self.ui.pending_mode.setIcon(
-        #    QIcon(QPixmap(":/res/mode_switch_card_active.png"))
-        # )
-        self.ui.pending_mode.setChecked(True)
-
-        self.main_view_mode = self.MAIN_VIEW_PENDING
-
-        self._change_dict = {}
-        self._get_default_changelists()
-        self._get_pending_changelists()
-
-        # publish_widget, self._pending_publish_list = self._create_perforce_ui(self._change_dict, sorted=True)
-        self.pending_tree_view = TreeViewWidget(data_dict=self._change_dict, sorted=True, mode="pending", p4=self._p4, parent=self)
-        self.pending_tree_view.set_mode()
-        self.pending_tree_view.single_selection()
-        self.pending_tree_view.populate_treeview_widget_pending()
-        self._pending_view_widget = self.pending_tree_view.get_treeview_widget()
-
-        # Pending Scroll Area
-        #self.ui.pending_scroll.setWidget(self._pending_view_widget)
-        # Create a container widget for the TreeView
-        container_widget = QWidget()
-        container_layout = QVBoxLayout(container_widget)
-        container_layout.setContentsMargins(0, 0, 0, 0)
-        container_layout.setSpacing(0)
-
-        # Add the TreeView widget to the container layout
-        self._pending_view_widget = self.pending_tree_view.get_treeview_widget()
-        self.pending_tree_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        container_layout.addWidget(self._pending_view_widget)
-
-        # Add a stretch to ensure proper resizing
-        container_layout.addStretch()
-
-        # Attach the container to the scroll area
-        self.ui.pending_scroll.setWidget(container_widget)
-        self.ui.pending_scroll.setWidgetResizable(True)
-        self.ui.pending_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.ui.pending_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-
-        self._pending_view_model = self.pending_tree_view.proxymodel
-        self._create_pending_view_context_menu()
-
-        msg = "\n <span style='color:#2C93E2'> Right-click on a file to 'Publish...' the changelist in Shotgrid or 'Revert' it in Perforce.</span> \n"
-
-        #msg = "\n <span style='color:#2C93E2'>Choose the files you want to publish from the Pending view and then initiate the publishing process using the Shotgrid Publisher by clicking 'Submit Files'.</span> \n"
-        self._add_log(msg, 2)
-        self.ui.sync_files.setEnabled(False)
-        self.ui.sync_parents.setEnabled(False)
-        self.ui.fix_selected.setEnabled(False)
-        self.ui.fix_all.setEnabled(False)
-        self.ui.submit_files.setEnabled(True)
-
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.populate_pending_widget()
 
     def _refresh_all(self):
-        # logger.debug("Refreshing entity preset tabs...")
-        # self.refresh_entity_preset_tabs()
-
-        mode = self.main_view_mode
+        mode = self._view_manager.main_view_mode
         if mode == self.MAIN_VIEW_LIST:
             logger.debug("Refreshing list view with updated data...")
             self._refresh_publish_area()
@@ -1823,14 +1180,10 @@ class AppDialog(QWidget):
 
 
     def _refresh_column_view(self):
-        """
-        Hard reload all caches
-        """
-
         self._refresh_publish_area()
         msg = "\n <span style='color:#2C93E2'>Refreshing Column view ...</span> \n"
         self._add_log(msg, 2)
-        self._populate_column_view_widget()
+        self._view_manager.populate_column_view_widget()
 
     def _refresh_submitted_view(self):
         """
@@ -1951,94 +1304,8 @@ class AppDialog(QWidget):
         Finds the currently selected entity, determines its Perforce depot path,
         and syncs the files within that path that need updating.
         """
-        logger.info("Starting sync for the current selection...")
         entity_path, entity_id, entity_type = self._get_selected_entity_path_info()
-        logger.info(f"Selected Entity path {entity_path}")
-
-        if not entity_path:
-            logger.warning("No valid path found for the selected entity.")
-            self._add_log(
-                "\n <span style='color:#FFD700'>No valid path found for the selected entity.</span> \n", 2)
-            return
-
-        # Convert local path to Perforce depot path
-        depot_path_base = self._convert_local_to_depot(entity_path)
-        if not depot_path_base:
-            logger.error(f"Could not convert local path '{entity_path}' to a Perforce depot path.")
-            self._add_log(
-                f"\n <span style='color:#CC3333'>Error: Could not map '{entity_path}' to a Perforce path.</span> \n", 2)
-            return
-
-        # Build Perforce wildcard path
-        depot_path_wildcard = depot_path_base.rstrip('/') + '/...'
-        logger.info(f"[SYNC CHECK] Running dry-run sync on: {depot_path_wildcard}")
-
-        # Run dry-run sync to list files
-        try:
-            if not self._p4.connected():
-                self._p4.connect()
-            sync_output = self._p4.run_sync("-n", depot_path_wildcard)
-            if not isinstance(sync_output, list):
-                logger.error(
-                    f"[SYNC CHECK] Expected list of files, got {type(sync_output)} for path {depot_path_wildcard}")
-                self._add_log(
-                    f"\n <span style='color:#CC3333'>Dry-run sync failed: Invalid response for {depot_path_wildcard}</span> \n",
-                    2)
-                return
-            depot_files = [entry.get("depotFile") for entry in sync_output if "depotFile" in entry]
-            num_files = len(depot_files)
-        except Exception as e:
-            #logger.error(f"[SYNC CHECK] Exception during sync check for entity path {entity_path}: {e}")
-            #self._add_log(
-            #    f"\n <span style='color:#CC3333'>Dry-run sync failed: {e}</span> \n", 2)
-            return
-
-        logger.info(f"Total files to sync: {num_files}")
-        self._add_log(f"\n <span style='color:#2C93E2'>Found {num_files} files that need syncing.</span> \n", 2)
-
-        if depot_files:
-            logger.info("Files to sync:")
-            for i, path in enumerate(depot_files, 1):
-                msg = f"[{i:02}] {path}"
-                self._add_log(msg, 3)
-        else:
-            logger.info("No individual depot files found in sync output.")
-            self._add_log("\n <span style='color:#2C93E2'>No files to sync.</span> \n", 2)
-            self._update_progress(100)
-            self._after_syncing_operations()
-            return
-
-        # Define sync logic in thread
-        def sync_thread_fn():
-            try:
-                # Sync files one by one to track progress
-                for i, depot_file in enumerate(depot_files, 1):
-                    # Skip syncing if a new sync operation has started
-                    if not hasattr(self, '_sync_active') or not self._sync_active:
-                        logger.info("Sync operation cancelled due to new sync request.")
-                        return
-
-                    # Sync individual file
-                    self._p4.run_sync(depot_file)
-                    progress = (i / num_files) * 100
-                    file_name = depot_file.split('/')[-1]
-                    msg = f"Syncing {file_name} ({i}/{num_files})" if logger.isEnabledFor(
-                        logging.DEBUG) else f"({i}/{num_files}) Syncing..."
-                    self._add_log(msg, 3)
-                    self._update_progress(progress)
-            except Exception as e:
-                logger.error(f"Sync failed: {e}")
-                self._add_log(
-                    f"\n <span style='color:#CC3333'>Sync failed: {e}</span> \n", 2)
-            finally:
-                self._sync_active = False
-                self._add_log("\n <span style='color:#2C93E2'>Sync complete for current selection.</span> \n", 2)
-                self._after_syncing_operations()
-
-        # Set sync active flag and start thread
-        self._sync_active = True
-        sync_thread = threading.Thread(target=sync_thread_fn)
-        sync_thread.start()
+        self._sync_manager.sync_current_entity(entity_path)
 
 
 
@@ -2369,767 +1636,212 @@ class AppDialog(QWidget):
         return entity_path, entity_id, entity_type
 
     def _create_pending_view_context_menu(self):
-
-        self._pending_view_publish_action = QAction("Publish...", self._pending_view_widget)
-        self._pending_view_publish_action.triggered.connect(lambda: self._on_pending_view_model_action("publish"))
-
-        self._pending_view_submit_action = QAction("Submit...", self._pending_view_widget)
-        self._pending_view_submit_action.triggered.connect(self._on_submit_files)  # Connect to _on_submit_files
-
-        self._pending_view_revert_action = QAction("Revert", self._pending_view_widget)
-        self._pending_view_revert_action.triggered.connect(lambda: self._on_pending_view_model_action("revert"))
-        self._pending_view_move_action = QAction("Move to Changelist", self._pending_view_widget)
-        self._pending_view_move_action.triggered.connect(lambda: self._on_pending_view_model_action("move"))
-
-        self._pending_view_widget.setContextMenuPolicy(Qt.CustomContextMenu)
-        self._pending_view_widget.customContextMenuRequested.connect(
-            self._show_pending_view_actions
-        )
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._create_pending_view_context_menu()
 
     def _show_pending_view_actions(self, pos):
-        """
-               Shows the actions for the current pending view selection.
-
-               :param pos: Local coordinates inside the viewport when the context menu was requested.
-        """
-
-        # Get the index of the item at the menu position
-        index = self._pending_view_widget.indexAt(pos)
-        if not index.isValid():
-            return
-
-        # Determine if the index is a parent or a child
-        is_parent = not index.parent().isValid()
-
-        # Build a menu with all the actions.
-        menu = QMenu(self)
-
-        # Add "Publish..." for parent rows, "Revert" for child rows
-        if is_parent:
-            menu.addAction(self._pending_view_publish_action)
-            menu.addAction(self._pending_view_submit_action)
-        else:
-            menu.addAction(self._pending_view_revert_action)
-            menu.addSeparator()
-            menu.addAction(self._pending_view_move_action)
-
-        menu.addSeparator()
-
-        # Calculate the global position of the menu
-        global_pos = self._pending_view_widget.mapToGlobal(pos)
-
-        # Execute the menu using a QEventLoop to block until an action is triggered
-        event_loop = QEventLoop()
-        menu.aboutToHide.connect(event_loop.quit)
-        menu.exec_(global_pos)
-        event_loop.exec_()
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._show_pending_view_actions(pos)
 
     def _list_files_in_changelist(self, change):
-        try:
-            p4_result = self._p4.run("describe", "-s", str(change))
-            logger.debug("p4_result for {change}: {p4_result}")
-            files_in_changelist = []
-            for depot_file in p4_result[0]["depotFile"]:
-                client_file = self._get_client_file(depot_file)
-                files_in_changelist.append(client_file)
-            return files_in_changelist
-        except Exception as e:
-            logger.debug("Error listing files in changelist {}: {}".format(change, e))
-            return []
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._list_files_in_changelist(change)
 
     def _validate_changelist_files(self, files_in_changelist):
-        """ Validate changelist files """
-        error_list = []
-        for filepath in files_in_changelist:
-            sg_item = {}
-            sg_item["path"] = {}
-            sg_item["path"]["local_path"] = filepath
-            entity, published_file = self.get_entity_from_sg_item(sg_item)
-            #logger.debug("_validate_changelist_files: entity: {}".format(entity))
-            #logger.debug("_validate_changelist_files: published_file: {}".format(published_file))
-            if not entity:
-                error_list.append(filepath)
-                logger.debug("_validate_changelist_files: error_list: {}".format(error_list))
-        if error_list and len(error_list)>0:
-            return False, error_list
-        else:
-            return True, error_list
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._validate_changelist_files(files_in_changelist)
 
     def _on_pending_view_model_action(self, action):
-        selected_files_to_revert = []
-        selected_files_to_delete = []
-        selected_actions_to_move = []
-        selected_files_to_move = []
-        engine = sgtk.platform.current_engine()
-        # logger.debug(">>>>>>>>>>> engine is: {}".format(engine))
-
-        # First, gather all the files that are to be reverted
-        selected_indexes = self._pending_view_widget.selectionModel().selectedRows()
-        change = 0
-        files_in_changelist = []
-        description = ""
-        if action == "publish" and selected_indexes:
-            for selected_index in selected_indexes:
-                try:
-                    source_index = self._pending_view_model.mapToSource(selected_index)
-                    change, description = self._get_pending_info_from_source(source_index)
-                except Exception as e:
-                    logger.debug("Error processing selection: {}".format(e))
-            if change:
-                files_in_changelist = self._list_files_in_changelist(change)
-                logger.debug("Files in changelist {}: {}".format(change, files_in_changelist))
-                # Validate changelist files using threading
-                result, error_list = self._validate_changelist_files_with_threads(files_in_changelist)
-
-                if not result:
-                        msg = "\n <span style='color:#CC3333'>The following files in the changelist {} are not linked to any Shotgrid entity:</span> \n".format(change)
-                        self._add_log(msg, 2)
-                        for filepath in error_list:
-                            msg = "\n <span style='color:#CC3333'>{}</span> \n".format(filepath)
-                            self._add_log(msg, 2)
-                        # Exit without publishing
-                        return
-
-            try:
-                try:
-                    # Create the description file
-                    self._create_description_file(files_in_changelist, description)
-                except:
-                    pass
-                logger.debug("change is: {}".format(change))
-                engine = sgtk.platform.current_engine()
-                if engine:
-                    app_command = engine.commands.get("Publish...")
-                    if app_command:
-                        logger.debug("Pass in the desired changelist parameter: {}".format(change))
-                        app_command["callback"](change)
-
-            except Exception as e:
-                logger.debug("Error loading publisher: {}".format(e))
-
-
-        # If the action is revert, then proceed
-        if action == "revert" and selected_indexes:
-            for selected_index in selected_indexes:
-                try:
-                    source_index = self._pending_view_model.mapToSource(selected_index)
-                    selected_row_data = self._get_pending_data_from_source(source_index)
-                    action = self._get_action_data_from_source(source_index)
-                    change = self._get_change_data_from_source(source_index)
-                    #if selected_row_data and "#" in selected_row_data:
-                    if selected_row_data:
-                        target_file = selected_row_data.split("#")[0]
-                        target_file = target_file.strip()
-                        logger.debug("Revert: Target file {target_file}")
-                        selected_files_to_revert.append(target_file)
-                        #if action in ["add"]:
-                        #    selected_files_to_delete.append((change,target_file))
-
-                except Exception as e:
-                    logger.debug("Error processing selection: {}".format(e))
-            if selected_files_to_revert:
-                # Convert list of files into a string, to show in the confirmation dialog
-                files_str = "\n".join(selected_files_to_revert)
-                logger.debug("Revert: files_str {files_str}")
-                # Show confirmation dialog
-                reply = QMessageBox.question(self, 'Confirmation',
-                                             f"Are you sure you want to revert the following files?\n\n{files_str}",
-                                             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-
-                if reply == QMessageBox.Yes:
-                    for target_file in selected_files_to_revert:
-                        try:
-                            msg = f"Reverting file {target_file} ..."
-                            self._add_log(msg, 3)
-                            p4_result = self._p4.run("revert", target_file)
-                            logger.debug("p4_result for {target_file}: {p4_result}")
-                        except Exception as e:
-                            logger.debug("Unable to revert file: {}, Error: {}".format(target_file, e))
-            if selected_files_to_delete:
-                # Convert list of files into a string, to show in the confirmation dialog
-                files_str = "\n".join(selected_files_to_revert)
-
-                # Show confirmation dialog
-                reply = QMessageBox.question(self, 'Confirmation',
-                                             f"Are you sure you want to delete the following files?\n\n{files_str}",
-                                             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-
-                if reply == QMessageBox.Yes:
-                    self._delete_pending_data(selected_files_to_revert)
-                    """
-                    for change, target_file in selected_files_to_revert:
-                        try:
-                            msg = f"Deleting file {target_file} ..."
-                            self._add_log(msg, 3)
-                            self._delete_pending_file(target_file)
-                        except Exception as e:
-                            logger.debug("Unable to delete file: {}, Error: {}".format(target_file, e))
-                    """
-        # If the action is move, then move files to a different changelist
-        if action == "move" and selected_indexes:
-            logger.debug("Move files to a different changelist")
-            for selected_index in selected_indexes:
-                try:
-                    source_index = self._pending_view_model.mapToSource(selected_index)
-                    selected_row_data = self._get_pending_data_from_source(source_index)
-                    change = self._get_change_data_from_source(source_index)
-                    if selected_row_data:
-                        # get the sg_tem from the source index
-                        action = self._get_action_data_from_source(source_index)
-                        sg_item = self._get_sg_data_from_source(source_index)
-                        selected_actions_to_move.append((sg_item, action))
-                        target_file = sg_item.get("depotFile", None)
-                        # If there is no depot file, try to get the local path
-                        if not target_file:
-                            if "path" in sg_item:
-                                if "local_path" in sg_item["path"]:
-                                    target_file = sg_item["path"].get("local_path", None)
-                        if target_file:
-                            selected_files_to_move.append(target_file)
-
-                except Exception as e:
-                    logger.debug("Error processing selection: {}".format(e))
-            if selected_files_to_move:
-                # Convert list of files into a string, to show in the confirmation dialog
-                files_str = "\n".join(selected_files_to_move)
-
-                # Show confirmation dialog
-                reply = QMessageBox.question(self, 'Confirmation',
-                                                   f"Do you wish to transfer the selected files to a new changelist?\n\n{files_str}",
-                                                   QMessageBox.Yes | QMessageBox.No,
-                                                   QMessageBox.No)
-
-                if reply == QMessageBox.Yes:
-                        try:
-                            if selected_actions_to_move:
-                                self.perform_changelist_selection(selected_actions_to_move)
-                        except Exception as e:
-                            logger.debug("Unable to revert file: {}, Error: {}".format(target_file, e))
-
-        if selected_files_to_revert or selected_files_to_delete or selected_files_to_move:
-            self._populate_pending_widget()
-
-    import threading
-    import os
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._on_pending_view_model_action(action)
 
     def _validate_changelist_files_with_threads(self, files_in_changelist):
-        """
-        Validate changelist files using threading for faster execution, adapting to the machine's capabilities.
-        """
-        # Use the number of available CPU cores for thread count or default to 1 if detection fails
-        num_threads = max(1, os.cpu_count() or 1)
-        files_per_thread = len(files_in_changelist) // num_threads
-        error_list = []
-        results = []
-
-        def validate_files_sublist(files_sublist):
-            """
-            Thread-safe validation of a sublist of files.
-            """
-            result, errors = self._validate_changelist_files(files_sublist)
-            results.append(result)
-            error_list.extend(errors)
-
-        threads = []
-        for i in range(num_threads):
-            start_index = i * files_per_thread
-            end_index = start_index + files_per_thread
-            if i == num_threads - 1:  # Ensure the last thread handles remaining files
-                end_index = len(files_in_changelist)
-            files_sublist = files_in_changelist[start_index:end_index]
-
-            # Create and start a thread for the sublist
-            thread = threading.Thread(target=validate_files_sublist, args=(files_sublist,))
-            threads.append(thread)
-            thread.start()
-
-        # Wait for all threads to complete
-        for thread in threads:
-            thread.join()
-
-        # Consolidate results
-        overall_result = all(results)
-        return overall_result, error_list
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._validate_changelist_files_with_threads(files_in_changelist)
 
     def _after_publish_ui_close(self):
-        logger.debug("Checking if the publisher UI is closed...")
-        # Setup a QTimer to periodically check the condition
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.check_publisher_ui_closed)
-        self.timer.start(1000)  # Check every 1000 milliseconds (1 second)
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._after_publish_ui_close()
 
     def check_publisher_ui_closed(self):
-        logger.debug("Checking if the publisher UI is closed through the timer...")
-        if os.path.exists(self._publisher_is_closed_path):
-            logger.debug("Reading publisher is closed status file {}...".format(self._publisher_is_closed_path))
-            with open(self._publisher_is_closed_path, 'r') as infile:
-                first_line = infile.readline().strip()
-
-            if "GUI_IS_CLOSED" in first_line:
-                self._populate_pending_widget()
-
-            os.remove(self._publisher_is_closed_path)
-            self.timer.stop()  # Stop the timer once the file is found and processed
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.check_publisher_ui_closed()
 
     def _wait_for_ui_close(self):
-        # Placeholder for logic to check if the UI window is closed
-        ui_is_open = True  # You will need to implement this check based on your UI framework
-        while ui_is_open:
-            time.sleep(1)  # Check every second (adjust the timing as necessary)
-            # Update the condition to check if the UI window is still open
-            ui_is_open = self._check_ui_closed()  # Implement this method based on your UI
-
-        msg = "\n <span style='color:#2C93E2'>Updating the Pending View ...</span> \n"
-        self._add_log(msg, 2)
-        self.update_pending_view()
-
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._wait_for_ui_close()
 
     def _check_ui_closed(self):
-        """
-        Display publisher UI is closed status
-        """
-        try:
-            logger.debug(
-                "checking for publisher is_closed status file: {} ...".format(self._publisher_is_closed_path))
-
-            if not os.path.exists(self._publisher_is_closed_path):
-                logger.debug("publisher is_closed file does not exist")
-                return None
-
-            with open(self._publisher_is_closed_path, 'r') as in_file:
-                for line in in_file:
-                    line = line.rstrip()
-                    # logger.debug(">>>> line: {}".format(line))
-                    if ":::" in line:
-                        parts = line.split(":::")
-                        if len(parts) == 2:
-                            base_file, status = parts
-                            logger.debug("publisher UI is closed status is: {}".format(status))
-                            msg = "\n <span style='color:#2C93E2'>Updating the Pending View ...</span> \n"
-                            self._add_log(msg, 2)
-                            self.update_pending_view()
-                            return status == 'True'
-                        else:
-                            # This handles the case where the split does not result in 2 parts
-                            logger.debug("Error: Line does not conform to expected format: '{}'".format(line))
-                            return False
-                    else:
-                        # Handle lines without delimiter or skip
-                        # For example, you might want to log a warning or error
-                        #logger.debug("Line without delimiter: {}".format(line))
-                        return False
-        except Exception as e:
-            logger.debug("Error reading publisher is closed file status {}".format(e))
-            return False
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._check_ui_closed()
 
     def _create_description_file(self, files_in_changelist, description):
-        try:
-            if files_in_changelist:
-                with open(self._publish_files_description, "w") as f:
-                    for file in files_in_changelist:
-                        base_file = os.path.basename(file)
-                        msg = f"{base_file}:::{description}"
-                        f.write(msg)
-                        f.write("\n")
-
-        except Exception as e:
-            logger.debug("Error creating description file: {}".format(e))
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._create_description_file(files_in_changelist, description)
 
     def _delete_pending_file(self, change, target_file):
-        try:
-            # Mark the file for delete in Perforce
-            p4_result = self._p4.run("delete", target_file)
-            # Submit the file to Perforce
-            submit_del_res = submit_change(self._p4, change, target_file)
-            logger.debug("p4_result for {target_file}: {submit_del_res}")
-        except Exception as e:
-            logger.debug("Unable to delete file: {}, Error: {}".format(target_file, e))
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._delete_pending_file(change, target_file)
 
     def _get_pending_data_from_source(self, source_index):
-        # Get data from the source model using the source index
-        if source_index.isValid():
-            parent_item = source_index.model().itemFromIndex(source_index.parent())
-
-            # If the parent item exists, fetch the child item.
-            # Otherwise, just fetch the item at the top level (as you did before)
-            if parent_item:
-                child_item = parent_item.child(source_index.row(), 0)
-            else:
-                child_item = source_index.model().item(source_index.row(), 0)
-
-            if child_item:
-                return child_item.text()
-        return None
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_pending_data_from_source(source_index)
 
     def _get_action_data_from_source(self, source_index):
-        # Get data from the source model using the source index
-        if source_index.isValid():
-            id_role = QtCore.Qt.UserRole + 1
-            action = source_index.data(id_role)
-            return action
-        return None
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_action_data_from_source(source_index)
 
     def _get_change_data_from_source(self, source_index):
-        # Get data from the source model using the source index
-        if source_index.isValid():
-            id_role = QtCore.Qt.UserRole + 2
-            change = source_index.data(id_role)
-            if change and change != "default":
-                change = int(change)
-                return change
-            if change == "default":
-                return change
-
-        return 0
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_change_data_from_source(source_index)
 
     def _get_sg_data_from_source(self, source_index):
-        # Get sg_item from the source model using the source index
-        try:
-            if source_index.isValid():
-                id_role = QtCore.Qt.UserRole + 3
-                sg_item = source_index.data(id_role)
-                if sg_item:
-                    return sg_item
-        except Exception as e:
-            logger.debug("Unable to get sg_item data: {}".format(e))
-        return None
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_sg_data_from_source(source_index)
 
     def _get_pending_info_from_source(self, source_index):
-        # Get changelist from the source model using the source index
-        if source_index.isValid():
-            item_model = source_index.model()
-            parent_index = source_index.parent()
-
-            # If the parent index is valid, it means the item is a child.
-            # In that case, get the parent item and its data.
-            # Otherwise, it means the item is a parent, so get its data directly.
-            if parent_index.isValid():
-                parent_item = item_model.itemFromIndex(parent_index)
-                changelist = parent_item.data(QtCore.Qt.UserRole)
-                description = parent_item.data(QtCore.Qt.UserRole + 4)
-            else:
-                item = item_model.itemFromIndex(source_index)
-                changelist = item.data(QtCore.Qt.UserRole)
-                description = item.data(QtCore.Qt.UserRole + 4)
-
-            return changelist, description
-        return None
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_pending_info_from_source(source_index)
 
     def _populate_column_view_widget(self):
-        #self._publish_model.hard_refresh()
-        self._column_view_dict = {}
-        self._standard_item_dict = {}
+        """Compatibility wrapper -- delegates to ViewManager."""
+        self._view_manager.set_sg_data(self._sg_data)
+        self._view_manager.set_item_path_dict(self._item_path_dict)
+        self._view_manager.set_entity_path(self._entity_path)
+        self._view_manager.populate_column_view_widget()
+        # Update compatibility aliases
+        self.column_view_model = self._view_manager.column_view_model
+        self.perforce_proxy_model = self._view_manager.perforce_proxy_model
 
-        logger.debug("Setting up Column View table ...")
-        self._setup_column_view()
-        logger.debug("Getting Perforce data...")
-        self._perforce_sg_data = self._get_perforce_sg_data()
-        length = len(self._perforce_sg_data)
-        if not self._perforce_sg_data:
-            self._perforce_sg_data = self._sg_data
-        if self._perforce_sg_data and length > 0:
-            msg = "\n <span style='color:#2C93E2'>Populating the Column View with {} files. Please wait...</span> \n".format(
-                length)
-            self._add_log(msg, 2)
-            logger.debug("Getting Perforce file size...")
-            self._perforce_sg_data = self._get_perforce_size(self._perforce_sg_data)
-            logger.debug("Populating Column View table...")
+    def _setup_column_view(self):
+        """Compatibility wrapper -- delegates to ViewManager."""
+        self._view_manager._setup_column_view()
+        self.column_view_model = self._view_manager.column_view_model
+        self.perforce_proxy_model = self._view_manager.perforce_proxy_model
 
-            logger.debug("Updating Column View is complete")
+    def _setup_file_details_panel(self, items):
+        """Compatibility wrapper -- delegates to ViewManager."""
+        self._view_manager.setup_file_details_panel(items)
 
-            for sg_item in self._perforce_sg_data:
-                # logger.debug("------------------------------------------")
-                #for k, v in sg_item.items():
-                #   logger.debug(">>> {}:{}".format(k, v))
-                id = sg_item.get("id", 0)
-                new_sg_item, sg_list = self._get_column_data(sg_item)
-                #logger.debug(">>> original sg_item: {}".format(sg_item))
-                #logger.debug(">>> new sg_item: {}".format(new_sg_item))
-                if id not in self._column_view_dict and new_sg_item:
-                    self._column_view_dict[id] = new_sg_item
-                #logger.debug(">>> sg_list: {}".format(sg_list))
-                if sg_list:
-
-                    #item = [QStandardItem(str(data)) for data in sg_list]
-                    self._standard_item_dict[id] = sg_list
-            #logger.debug(">>> self._column_view_dict: {}".format(self._column_view_dict))
-            #logger.debug(">>> self._standard_item_dict: {}".format(self._standard_item_dict))
-            #self._populate_column_view_no_groups()
-            self._get_grouped_column_view_data()
-            self._get_publish_icons()
-            self._set_column_group()
+    def _setup_column_details_panel(self, id):
+        """Compatibility wrapper -- delegates to ViewManager."""
+        self._view_manager._setup_column_details_panel(id)
 
     def _set_column_group(self):
-        if self._current_column_view_grouping == self.COLUMN_VIEW_UNGROUP:
-            self._no_groups()
-        elif self._current_column_view_grouping == self.COLUMN_VIEW_GROUP_BY_FOLDER:
-            self._group_by_folder()
-        elif self._current_column_view_grouping == self.COLUMN_VIEW_GROUP_BY_ACTION:
-            self._group_by_action()
-        elif self._current_column_view_grouping == self.COLUMN_VIEW_GROUP_BY_REVISION:
-            self._group_by_revision()
-        elif self._current_column_view_grouping == self.COLUMN_VIEW_GROUP_BY_EXTENSION:
-            self._group_by_file_extension()
-        elif self._current_column_view_grouping == self.COLUMN_VIEW_GROUP_BY_TYPE:
-            self._group_by_type()
-        elif self._current_column_view_grouping == self.COLUMN_VIEW_GROUP_BY_USER:
-            self._group_by_user()
-        elif self._current_column_view_grouping == self.COLUMN_VIEW_GROUP_BY_TASK:
-            self._group_by_task_name()
-        elif self._current_column_view_grouping == self.COLUMN_VIEW_GROUP_BY_STATUS:
-            self._group_by_task_status()
-        elif self._current_column_view_grouping == self.COLUMN_VIEW_GROUP_BY_STEP:
-            self._group_by_step()
-        elif self._current_column_view_grouping == self.COLUMN_VIEW_GROUP_BY_DATE_MODIFIED:
-            self._group_by_date_modified()
-        else:
-            raise ValueError("Invalid column view grouping specified!")
+        """Compatibility wrapper -- delegates to ViewManager."""
+        self._view_manager._set_column_group()
 
-    def _get_grouped_column_view_data(self):
+    def _turn_all_modes_off(self):
+        """Compatibility wrapper -- delegates to ViewManager."""
+        self._view_manager._turn_all_modes_off()
 
-        self._folder_dict = self._get_column_dict("folder")
-        #logger.debug(">>> self._folder_dict: {}".format(self._folder_dict))
-        self._action_dict = self._get_column_dict("action")
-        self._revision_dict = self._get_column_dict("revision")
-        self._file_extension_dict = self._get_column_dict("file_extension")
-        self._type_dict = self._get_column_dict("file_type")
-        self._task_name_dict = self._get_column_dict("task_name")
-        self._task_status_dict = self._get_column_dict("task_status")
-        self._user_dict = self._get_column_dict("user")
-        self._step_dict = self._get_column_dict("step")
-        self._date_modified_dict = self._get_column_dict("date_modified")
+    def _show_thumb_scale(self, is_visible):
+        """Compatibility wrapper -- delegates to ViewManager."""
+        self._view_manager._show_thumb_scale(is_visible)
 
-    def _get_column_dict(self, key):
-        column_dict = {}
-        for id, sg_item in self._column_view_dict.items():
-            if sg_item:
-                value = sg_item.get(key)
-                # logger.debug(">>> value: {}".format(value))
-                # logger.debug(">>> id: {}".format(id))
-                if value is not None and key != "folder":
-                    column_dict.setdefault(value, []).append(self._standard_item_dict.get(id))
-                else:
-                    column_dict.setdefault(value or "N/A", []).append(self._standard_item_dict.get(id))
+    def _toggle_details_pane(self):
+        """Compatibility wrapper -- delegates to ViewManager."""
+        self._view_manager.toggle_details_pane()
 
-        return column_dict
+    def _set_details_pane_visiblity(self, visible):
+        """Compatibility wrapper -- delegates to ViewManager."""
+        self._view_manager.set_details_pane_visibility(visible)
 
-    def _get_column_data(self, sg_item):
-        new_sg_item = sg_item
-        sg_list = []
-        if not sg_item:
-            return new_sg_item, sg_list
+    def _on_detail_version_playback(self):
+        """Compatibility wrapper -- delegates to ViewManager."""
+        self._view_manager.on_detail_version_playback()
 
-        # logger.debug(">>> In _get_column_data, getting column data for sg_item: {}".format(sg_item))
-        #try:
-        # logger.debug(">>> Getting row {} data".format(row))
-        # self._print_sg_item(sg_item)
-        # Extract relevant data from the Shotgun response
-        name = sg_item.get("name", "N/A")
-        new_sg_item["name"] = name
-        action = sg_item.get("action") or sg_item.get("headAction") or "N/A"
-        new_sg_item["action"] = action
-        revision = sg_item.get("revision", "N/A")
-        if revision != "N/A":
-            #revision = "#{}".format(revision)
-            new_sg_item["revision"] = revision
+    def _on_publish_selection(self, selected, deselected):
+        """Compatibility wrapper -- delegates to ViewManager then emits signal."""
+        self._view_manager.on_publish_selection(selected, deselected)
+        self.selection_changed.emit()
 
-        local_path = "N/A"
-        folder = "N/A"
-        # logger.debug(">>> Getting path data")
-        if "path" in sg_item:
-            path = sg_item.get("path", None)
-            # logger.debug(">>> path: {}".format(path))
-            if path:
-                local_path = path.get("local_path", "N/A")
-                if local_path and local_path != "N/A":
-                    local_directory = os.path.dirname(local_path)
-                    entity_path = self._entity_path
-                    if local_directory and not entity_path:
-                        entity = sg_item.get("entity", None)
-                        if entity:
-                            # Get entity path
-                            entity_path = self._get_entity_path(entity)
+    def _on_publish_content_change(self):
+        """Compatibility wrapper -- delegates to ViewManager."""
+        self._view_manager.on_publish_content_change()
 
-                    if entity_path and local_directory:
-                        logger.debug("entity_path: {}".format(entity_path))
-                        logger.debug("local_directory: {}".format(local_directory))
-                        folder = self._path_difference(entity_path, local_directory)
+    def _apply_type_filters_on_publishes(self):
+        """Compatibility wrapper -- delegates to ViewManager."""
+        self._view_manager.apply_type_filters_on_publishes()
 
-                    if local_directory and not entity_path:
-                        # Get the parent directory of local_directory
-                        folder = os.path.basename(local_directory)
-                        logger.debug("No entity path found, we will use parent folder: {}".format(folder))
-                    if folder and folder != "N/A":
-                        # folder = "{}\\".format(difference_str)
-                        new_sg_item["folder"] = folder
-
-        file_extension = "N/A"
-        if local_path and local_path != "N/A":
-            file_extension = local_path.split(".")[-1] or "N/A"
-            new_sg_item["file_extension"] = file_extension
-
-        type = "N/A"
-        if file_extension and file_extension != "N/A":
-            type = self.settings.get(file_extension, "N/A")
-            new_sg_item["file_type"] = type
-
-        size = sg_item.get("fileSize", 0)
-        new_sg_item["size"] = size
-
-        # published_file_type = sg_item.get("published_file_type", {}).get("name", "N/A")
-
-        description = sg_item.get("description", "N/A")
-        #new_sg_item["description"] = description
-        if description:
-            description = description.split("\n")[0]
-
-        publish_id = 0
-        if "id" in sg_item:
-            publish_id = sg_item.get("id", 0)
-            new_sg_item["publish_id"] = publish_id
-
-        task_name = "N/A"
-        step = "N/A"
-        if "task" in sg_item:
-            task = sg_item.get("task", None)
-            if task:
-                task_name = task.get("name", "N/A")
-                new_sg_item["task_name"] = task_name
-
-                step = sg_item.get("task.Task.step.Step.code", None)
-                # logger.debug(">>> step: {}".format(step))
-                if not step:
-                    step = self._get_pipeline_step(publish_id)
-                new_sg_item["step"] = step
-                # step = sg_item.get("step", {}).get("name", "N/A")
-                # step = sg_item.get("task.Task.step.Step.code", "N/A") if step == "N/A" else step
-
-        task_status = sg_item.get("task.Task.sg_status_list", "N/A")
-        new_sg_item["task_status"] = task_status
-
-        user = "N/A"
-        if "created_by" in sg_item:
-            user = sg_item.get("created_by", None)
-            if user:
-                user = user.get("name", "N/A")
-                new_sg_item["user"] = user
-
-        dt = sg_item.get("created_at") or sg_item.get("headModTime") or sg_item.get("headTime") or None
-        # logger.debug(">>> dt: {}".format(dt))
-        dt = float(dt) if dt else 0
-        date = self._get_publish_time_for_column_view(dt)
-        new_sg_item["date"] = date
-        # logger.debug(">>> date: {}".format(date))
-        date_modified = self._get_modified_date(dt)
-        new_sg_item["date_modified"] = date_modified
-        # logger.debug(">>> date_modified: {}".format(date_modified))
-
-        # Create a list of QStandardItems for each column
-        sg_list = ["", folder, action, name, revision, size, file_extension, type, user, task_name, task_status, step, date,date_modified,
-                   publish_id,
-                   description]
-                
-        #except Exception as e:
-        #    logger.debug(">>> Error getting column data for sg_item, error {}".format(e))
-        return new_sg_item, sg_list
-
-    def _get_pipeline_step(self, published_file_id):
-
-        pipeline_step = "N/A"
-        published_file = self._app.shotgun.find_one("PublishedFile", [["id", "is", published_file_id]], ["id", "code", "pipeline_step", "task.Task.step.Step.code", "step"])
-        if published_file:
-            # logger.debug(">>>>>>>>> published_file: {}".format(published_file))
-            pipeline_step = published_file.get("task.Task.step.Step.code", "N/A")
-            # logger.debug(">>>>>>>>> pipeline_step: {}".format(pipeline_step))
-            """
-            if not pipeline_step:
-                task = published_file.get("task")
-                if task:
-                    pipeline_step = task.get("step")
-            """
-        return pipeline_step
-
-    def _get_modified_date(self, dt):
-        """
-        Converts a timestamp (float) to a datetime object before passing
-        it to create_modified_date.
-
-        :param dt: Float timestamp representing the modification time, or 0.
-        :return: Human-readable date string or "N/A".
-        """
-        publish_time = "N/A" # Default value
-        if dt and dt > 0:
-            try:
-                # Convert the float timestamp to a datetime object
-                dt_datetime = datetime.datetime.fromtimestamp(dt)
-                # Pass the datetime object to the helper function
-                publish_time = create_modified_date(dt_datetime)
-            except ValueError as e:
-                logger.error(f"Error converting timestamp {dt} to datetime: {e}")
-                publish_time = "Invalid Date"
-            except Exception as e:
-                # Catch potential errors within create_modified_date itself
-                logger.error(f"Error in create_modified_date for timestamp {dt}: {e}")
-                publish_time = "Error"
-        # else: dt is 0 or None, publish_time remains "N/A"
-
-        return publish_time
-
-    def _get_publish_time_for_column_view(self, dt):
-        publish_time = "N/A"
-        if dt > 0:
-            publish_time = datetime.datetime.fromtimestamp(dt).strftime(
-                "%Y-%m-%d %H:%M"
-            )
-
-        return publish_time
+    def _on_thumb_size_slider_change(self, value):
+        """Compatibility wrapper -- delegates to ViewManager."""
+        self._view_manager.on_thumb_size_slider_change(value)
 
     def _get_entity_path(self, entity_data):
-        """
-        Get entity path
-        """
+        """Get entity path for a given entity."""
         if not entity_data:
             return None
-
         entity_id = entity_data.get('id', 0)
         entity_type = entity_data.get('type', None)
-        # entity_name = entity_data.get('name', None)
         if entity_type == "Task":
             entity = entity_data.get("entity", None)
             if entity:
                 entity_id = entity.get('id', entity_id)
                 entity_type = entity.get('type', entity_type)
-
         entity_path = self._app.sgtk.paths_from_entity(entity_type, entity_id)
-        #if not entity_path:
-        #    # Fetch the entity using the id and type
-        #    target_entity = self._app.shotgun.find_one(entity_type, [['id', 'is', entity_id]],
-        #                         ['code', 'path', 'sg_status_list', 'description'])
-        #    logger.debug(">>> target_entity: {}".format(target_entity))
-        #    entity_path = target_entity.get("path", None)
-
         return entity_path[-1] if entity_path else None
 
+    def _path_difference(self, path1, path2):
+        """Compatibility wrapper -- delegates to ViewManager."""
+        from .view_manager import ViewManager as VM
+        return VM._path_difference(path1, path2)
+
+    def get_row_data_from_source(self, source_index):
+        """Compatibility wrapper -- delegates to ViewManager."""
+        return self._view_manager._get_row_data_from_source(source_index)
+
+    def _set_column_view_mode(self):
+        """Compatibility wrapper -- delegates to ViewManager."""
+        from .view_manager import ViewManager as VM
+        self._view_manager.set_main_view_mode(VM.MAIN_VIEW_COLUMN)
+        self.main_view_mode = self._view_manager.main_view_mode
+
+    def _set_thump_view_mode(self):
+        """Compatibility wrapper -- delegates to ViewManager."""
+        from .view_manager import ViewManager as VM
+        self._view_manager.set_main_view_mode(VM.MAIN_VIEW_THUMB)
+        self.main_view_mode = self._view_manager.main_view_mode
+
+    def _on_column_view_action(self, action, action_data_list):
+        """Routes column view actions to appropriate manager."""
+        if not action_data_list:
+            return
+        data = action_data_list[0]
+        selected_items = data.get("selected_items", [])
+        files_to_revert = data.get("files_to_revert", [])
+        files_to_sync = data.get("files_to_sync", [])
+
+        if action == "revert" and files_to_revert:
+            try:
+                msg = f"Reverting {len(files_to_revert)} selected file(s)..."
+                self._add_log(msg, 2)
+                p4_result = self._p4.run("revert", *files_to_revert)
+                logger.debug(f"Bulk revert result: {p4_result}")
+                if p4_result:
+                    self.refresh_publish_data()
+            except Exception as e:
+                logger.error(f"Error during bulk revert: {e}")
+                self._add_log(f"Error during bulk revert: {e}", 2)
+
+        if action == "sync" and files_to_sync:
+            try:
+                msg = f"Syncing {len(files_to_sync)} selected file(s)..."
+                self._add_log(msg, 2)
+                self._do_sync_files_threading_thread_2(files_to_sync)
+                self._refresh_column_view()
+                msg = f"Syncing of {len(files_to_sync)} file(s) complete."
+                self._add_log(msg, 2)
+            except Exception as e:
+                logger.error(f"Error during bulk sync: {e}")
+                self._add_log(f"Error during bulk sync: {e}", 2)
+
+        if selected_items:
+            self.perform_changelist_selection(selected_items)
+
     def _get_perforce_sg_data(self):
-        perforce_sg_data = []
-
-        model = self.ui.publish_view.model()
-        if model.rowCount() > 0:
-            for row in range(model.rowCount()):
-                model_index = model.index(row, 0)
-                proxy_model = model_index.model()
-                source_index = proxy_model.mapToSource(model_index)
-                item = source_index.model().itemFromIndex(source_index)
-
-                is_folder = item.data(SgLatestPublishModel.IS_FOLDER_ROLE)
-                if not is_folder:
-                    # Run default action.
-                    sg_item = shotgun_model.get_sg_data(model_index)
-                    if sg_item:
-                        perforce_sg_data.append(sg_item)
-        return perforce_sg_data
+        """Compatibility wrapper -- delegates to ViewManager."""
+        return self._view_manager._get_perforce_sg_data()
 
     def _clean_sg_data(self):
         try:
@@ -3141,1260 +1853,31 @@ class AppDialog(QWidget):
                     proxy_model = model_index.model()
                     source_index = proxy_model.mapToSource(model_index)
                     item = source_index.model().itemFromIndex(source_index)
-
                     is_folder = item.data(SgLatestPublishModel.IS_FOLDER_ROLE)
                     if not is_folder:
-                        # Run default action.
                         sg_item = shotgun_model.get_sg_data(model_index)
                         action = sg_item.get("action") or sg_item.get("headAction") or None
                         if action and action in ["delete"]:
-                            # remove the item from the model
                             model.removeRow(row)
                             is_model_changed = True
-
                 if is_model_changed:
-                    # Refresh the model
                     model.layoutChanged.emit()
-                    # Refresh the view
                     self.ui.publish_view.update()
         except:
             pass
 
 
-
-
-    def _reset_perforce_widget(self):
-        self.ui.column_view = QTableView()
-    
-    def _setup_column_view(self):
-
-        # Create a table model and set headers
-        self.column_view_model = QStandardItemModel(0, len(self._headers))
-        self.column_view_model.setHorizontalHeaderLabels(self._headers)
-
-        # Create a proxy model for sorting and grouping
-        self.perforce_proxy_model = QtGui.QSortFilterProxyModel()
-        self.perforce_proxy_model.setSourceModel(self.column_view_model)
-
-        self.ui.column_view.setModel(self.perforce_proxy_model)
-
-        header = self.ui.column_view.header()
-        for col in range(len(self._headers)):
-            header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
-
-        self.ui.column_view.clicked.connect(self.on_column_view_row_clicked)
-
-        self._create_column_view_context_menu()
-        # Create the context menu for the header
-        self._create_column_view_header_context_menu()
-
-
-    def _create_column_view_header_context_menu(self):
-        header = self.ui.column_view.header()
-        header.setContextMenuPolicy(Qt.CustomContextMenu)
-        header.customContextMenuRequested.connect(self._show_column_header_context_menu)
-
-    def _show_column_header_context_menu(self, pos):
-        header = self.ui.column_view.header()
-        col_idx = header.logicalIndexAt(pos)
-        col_name = self.column_view_model.horizontalHeaderItem(col_idx).text()
-
-        menu = QMenu(self.ui.column_view)
-
-        # Add the "Group by folder" menu item
-        self._group_by_folder_action = QAction("Group by folder", self.ui.column_view)
-        self._group_by_folder_action.triggered.connect(self._group_by_folder)
-
-        # Add the "Group by action" menu item
-        self._group_by_action_action = QAction("Group by action", self.ui.column_view)
-        self._group_by_action_action.triggered.connect(self._group_by_action)
-
-        # Add grouping options for revision, file extension, type, task name, and task status
-        self._group_by_revision_action = QAction("Group by Revision", self.ui.column_view)
-        self._group_by_revision_action.triggered.connect(self._group_by_revision)
-
-        self._group_by_file_extension_action = QAction("Group by File Extension", self.ui.column_view)
-        self._group_by_file_extension_action.triggered.connect(self._group_by_file_extension)
-
-        self._group_by_type_action = QAction("Group by Type", self.ui.column_view)
-        self._group_by_type_action.triggered.connect(self._group_by_type)
-
-        # Add the "Group by user" menu item
-        self._group_by_user_action = QAction("Group by user", self.ui.column_view)
-        self._group_by_user_action.triggered.connect(self._group_by_user)
-
-        self._group_by_task_name_action = QAction("Group by Task Name", self.ui.column_view)
-        self._group_by_task_name_action.triggered.connect(self._group_by_task_name)
-
-        self._group_by_task_status_action = QAction("Group by Task Status", self.ui.column_view)
-        self._group_by_task_status_action.triggered.connect(self._group_by_task_status)
-
-        self._group_by_step_action = QAction("Group by Task Step", self.ui.column_view)
-        self._group_by_step_action.triggered.connect(self._group_by_step)
-
-        self._group_by_date_modified_action = QAction("Group by Date Modified", self.ui.column_view)
-        self._group_by_date_modified_action.triggered.connect(self._group_by_date_modified)
-
-        # Add a general Ungroup option
-        self._no_groups_action = QAction("Ungroup", self.ui.column_view)
-        self._no_groups_action.triggered.connect(self._no_groups)
-
-        # Add "Expand All" action
-        self._expand_all_action = QAction("Expand All", self.ui.column_view)
-        self._expand_all_action.triggered.connect(self._expand_all)
-
-        # Add "Collapse All" action
-        self._collapse_all_action = QAction("Collapse All", self.ui.column_view)
-        self._collapse_all_action.triggered.connect(self._collapse_all)
-
-        # Map each column to its relevant action(s)
-        actions_map = {
-            "Folder": [self._group_by_folder_action],
-            "Action": [self._group_by_action_action],
-            "Revision#": [self._group_by_revision_action],
-            "Extension": [self._group_by_file_extension_action],
-            "Type": [self._group_by_type_action],
-            "User": [self._group_by_user_action],  # Change "user" to "User"
-            "Task": [self._group_by_task_name_action],
-            "Status": [self._group_by_task_status_action],
-            "Step": [self._group_by_step_action],
-            "Date Modified": [self._group_by_date_modified_action],
-        }
-
-        # Add actions that are always present, regardless of the column
-        common_actions = [self._expand_all_action, self._collapse_all_action]
-
-        # Add actions
-
-        # Add actions based on the current column
-        for action in actions_map.get(col_name, []):
-            menu.addAction(action)
-
-        menu.addSeparator()
-
-        menu.addAction(self._no_groups_action)
-        menu.addSeparator()
-
-        # Add common actions
-        for action in common_actions:
-            menu.addAction(action)
-
-        # Calculate the global position of the menu
-        global_pos = header.mapToGlobal(pos)
-
-        # Execute the menu using a QEventLoop to block until an action is triggered
-        event_loop = QEventLoop()
-        menu.aboutToHide.connect(event_loop.quit)
-        menu.exec_(global_pos)
-        event_loop.exec_()
-
-    def _expand_all(self):
-        self.ui.column_view.expandAll()
-
-    def _collapse_all(self):
-        # Collapse all items
-        self.ui.column_view.collapseAll()
-
-    def _create_groups(self, group_dict):
-        # Clear all rows from the model
-        # self.column_view_model.clear()
-        # Set up the column view
-        self._setup_file_details_panel([])
-        self._setup_column_view()
-
-        # Add items to the model
-        for category, sg_data in group_dict.items():
-            # logger.debug(">>> category: {}, sg_data: {}".format(category, sg_data))
-            category_item = QStandardItem(category)
-            self.column_view_model.appendRow(category_item)
-            for sg_list in sg_data:
-                # logger.debug(">>> sg_list: {}".format(sg_list))
-                tooltip = ""
-                id = 0
-                if sg_list and len(sg_list) >= 15:
-                    id = sg_list[14]
-                    base_name = sg_list[3]
-                    if self._column_view_search_filter and len(self._column_view_search_filter) > 1:
-                        prefix = self._column_view_search_filter
-                        if not base_name.startswith(prefix):
-                            # logger.debug(">>> skipping base_name: {}, prefix: {}".format(base_name, prefix))
-                            continue
-                    # Skip deleted files
-                    action = sg_list[2]
-                    if action and action in ["delete"]:
-                        msg = "\n <span style='color:#2C93E2'>skipping deleted file: {}</span> \n".format(
-                            base_name)
-                        self._add_log(msg, 2)
-
-                        continue
-                    sg_item = self._column_view_dict.get(id, None)
-                    tooltip = self._get_tooltip(sg_list, sg_item)
-                item_list = []
-                for col, value in enumerate(sg_list):
-                    item = QStandardItem(str(value))
-                    item.setToolTip(tooltip)
-                    if col == 5:
-                        item.setData(value, Qt.DisplayRole)
-                    if col == 2:
-                        action = sg_list[2]
-                        # action_icon, icon_path = get_action_icon(action)
-                        action_icon = self.actions_icons.get_icon_pixmap(action)
-                        if action_icon:
-                            item.setIcon(action_icon)
-                    item.setData(str(id), QtCore.Qt.UserRole + 1)
-                    item_list.append(item)
-
-                category_item.appendRow(item_list)
-
-        # Add a callback when someone clicks on an item in the view
-        #self.ui.column_view.clicked.connect(self.on_column_view_item_clicked)
-
-        self.ui.column_view.expandAll()
-
-
-    def _get_sg_item_list_by_column_order(self, sg_item):
-        if not sg_item:
-            return [""]  # Fill the first column with an empty item
-        column_order = ["", "folder", "action", "name", "revision", "size", "file_extension", "type", "user",
-                        "task_name", "task_status", "step", "date", "date_modified", "publish_id", "description"]
-
-        sg_list = []
-        for attribute in column_order:
-            value = sg_item.get(attribute, "")
-            if attribute == "description" and value:
-                # Get description from the beginning until the first line break
-                value = value.split("\n")[0]
-            sg_list.append(value)
-
-        return sg_list
-
-    def _populate_column_view_no_groups(self):
-        """ Populate the table with data"""
-        row = 0
-        self._set_groups = False
-        for id, sg_item in self._column_view_dict.items():
-            if not sg_item:
-                continue
-            base_name = sg_item.get("name", None)
-            if base_name and self._column_view_search_filter and len(self._column_view_search_filter) > 1:
-                prefix = self._column_view_search_filter
-                if not base_name.startswith(prefix):
-                    # logger.debug(">>> skipping base_name: {}, prefix: {}".format(base_name, prefix))
-                    continue
-            # Skip deleted files
-            action = sg_item.get("action") or sg_item.get("headAction") or None
-            if action and action in ["delete"]:
-                msg = "\n <span style='color:#2C93E2'>skipping deleted file: {}</span> \n".format(
-                    base_name)
-                self._add_log(msg, 2)
-                continue
-            if id in self._standard_item_dict:
-                item_data = self._standard_item_dict[id]
-                self._insert_perforce_row(row, item_data, sg_item)
-                row += 1
-
-    def _apply_grouping_and_update_view(self, grouping_mode, group_dict, group_column_name):
-        """
-        Applies grouping to the column view, populates data, and adjusts column visibility
-        and headers to reflect the grouping.
-
-        :param grouping_mode: The COLUMN_VIEW enum for the new grouping.
-        :param group_dict: The dictionary containing the grouped data.
-        :param group_column_name: The string name of the column being grouped by.
-        """
-        # Set internal state for grouping
-        self._set_groups = True
-        self._current_column_view_grouping = grouping_mode
-
-        # Populate the view with grouped data. Note: this method also calls
-        # _setup_column_view(), which resets all headers and column visibility.
-        self._create_groups(group_dict)
-
-        # Now, modify the view based on the grouping
-        try:
-            # Find the index of the column that we are grouping by
-            column_to_hide_index = self._headers.index(group_column_name)
-            # Hide that column, as its data is now shown in the group headers
-            self.ui.column_view.setColumnHidden(column_to_hide_index, True)
-            logger.debug(f"Hiding column '{group_column_name}' at index {column_to_hide_index}.")
-        except ValueError:
-            # This should not happen if the group_column_name is correct
-            logger.warning(f"Could not find column '{group_column_name}' in headers to hide.")
-
-        # Update the header of the first column (which is now the grouping column)
-        # to show what the data is grouped by.
-        grouping_header_item = QStandardItem(group_column_name)
-        self.column_view_model.setHorizontalHeaderItem(0, grouping_header_item)
-        logger.debug(f"Setting header of column 0 to '{group_column_name}'.")
-
-    def _no_groups(self):
-        # This method resets the view to its default, ungrouped state.
-        # _setup_column_view will make all columns visible and reset headers correctly.
-        self._setup_column_view()
-        self._current_column_view_grouping = self.COLUMN_VIEW_UNGROUP
-        # Add non-grouped items to the model
-        self._populate_column_view_no_groups()
-
-    def _group_by_folder(self):
-        self._apply_grouping_and_update_view(
-            self.COLUMN_VIEW_GROUP_BY_FOLDER, self._folder_dict, "Folder"
-        )
-
-    def _group_by_action(self):
-        self._apply_grouping_and_update_view(
-            self.COLUMN_VIEW_GROUP_BY_ACTION, self._action_dict, "Action"
-        )
-
-    def _group_by_revision(self):
-        self._apply_grouping_and_update_view(
-            self.COLUMN_VIEW_GROUP_BY_REVISION, self._revision_dict, "Revision#"
-        )
-
-    def _group_by_file_extension(self):
-        self._apply_grouping_and_update_view(
-            self.COLUMN_VIEW_GROUP_BY_EXTENSION, self._file_extension_dict, "Extension"
-        )
-
-    def _group_by_type(self):
-        self._apply_grouping_and_update_view(
-            self.COLUMN_VIEW_GROUP_BY_TYPE, self._type_dict, "Type"
-        )
-
-    def _group_by_user(self):
-        self._apply_grouping_and_update_view(
-            self.COLUMN_VIEW_GROUP_BY_USER, self._user_dict, "User"
-        )
-
-    def _group_by_task_name(self):
-        self._apply_grouping_and_update_view(
-            self.COLUMN_VIEW_GROUP_BY_TASK, self._task_name_dict, "Task"
-        )
-
-    def _group_by_task_status(self):
-        self._apply_grouping_and_update_view(
-            self.COLUMN_VIEW_GROUP_BY_STATUS, self._task_status_dict, "Status"
-        )
-
-    def _group_by_step(self):
-        self._apply_grouping_and_update_view(
-            self.COLUMN_VIEW_GROUP_BY_STEP, self._step_dict, "Step"
-        )
-
-    def _group_by_date_modified(self):
-        self._apply_grouping_and_update_view(
-            self.COLUMN_VIEW_GROUP_BY_DATE_MODIFIED, self._date_modified_dict, "Date Modified"
-        )
-
-    def _create_column_view_context_menu(self):
-        self._column_add_action = QAction("Add", self.ui.column_view)
-        self._column_add_action.triggered.connect(lambda: self._on_column_model_action("add"))
-        self._column_edit_action = QAction("Edit", self.ui.column_view)
-        self._column_edit_action.triggered.connect(lambda: self._on_column_model_action("edit"))
-        self._column_delete_action = QAction("Delete", self.ui.column_view)
-        self._column_delete_action.triggered.connect(lambda: self._on_column_model_action("delete"))
-
-        self._column_revert_action = QAction("Revert", self.ui.column_view)
-        self._column_revert_action.triggered.connect(lambda: self._on_column_model_action("revert"))
-
-        self._column_sync_action = QAction("Sync", self.ui.column_view)
-        self._column_sync_action.triggered.connect(lambda: self._on_column_model_action("sync"))
-
-        #self._column_refresh_action = QAction("Refresh", self.ui.column_view)
-        #self._column_refresh_action.triggered.connect(self._publish_model.async_refresh)
-
-        self.ui.column_view.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.ui.column_view.customContextMenuRequested.connect(
-            self._show_column_actions
-        )
-    def _show_column_actions(self, pos):
-        """
-               Shows the actions for the current publish selection.
-
-               :param pos: Local coordinates inside the viewport when the context menu was requested.
-        """
-
-        # Build a menu with all the actions.
-        menu = QMenu(self)
-        actions = self._action_manager.get_actions_for_publishes(
-            self.selected_publishes, self._action_manager.UI_AREA_MAIN
-        )
-        menu.addActions(actions)
-
-        # Qt is our friend here. If there are no actions available, the separator won't be added, yay!
-        menu.addSeparator()
-        menu.addAction(self._column_add_action)
-        menu.addAction(self._column_edit_action)
-        menu.addAction(self._column_delete_action)
-        menu.addSeparator()
-        menu.addAction(self._column_revert_action)
-        menu.addSeparator()
-        menu.addAction(self._column_sync_action)
-        menu.addSeparator()
-        #menu.addAction(self._column_refresh_action)
-
-
-        # Calculate the global position of the menu
-        global_pos = self.ui.column_view.mapToGlobal(pos)
-
-        # Execute the menu using a QEventLoop to block until an action is triggered
-        event_loop = QEventLoop()
-        menu.aboutToHide.connect(event_loop.quit)
-        menu.exec_(global_pos)
-        event_loop.exec_()
-
-
-
-    def show_context_menu(self, pos):
-        # Show the context menu at the cursor position
-        selected_index = self.ui.column_view.indexAt(pos)
-        if selected_index.isValid():
-            source_index = self.perforce_proxy_model.mapToSource(selected_index)
-            selected_row_data = self.get_row_data_from_source(source_index)
-            if selected_row_data:
-                self.context_menu.exec_(self.ui.column_view.mapToGlobal(pos))
-
-    def get_row_data_from_source(self, source_index):
-        # Get data from the source model using the source index
-        row_data = []
-        if source_index.isValid():
-            row_number = source_index.row()
-            for col in range(self.column_view_model.columnCount()):
-                item = source_index.model().item(row_number, col)
-                if item:
-                    row_data.append(item.text())
-        logger.debug("Row data: {}".format(row_data))
-        return row_data
-
-
-    def on_column_view_row_clicked(self, index):
-        if self._set_groups:
-            self.on_column_view_row_clicked_group(index)
-        else:
-            self.on_column_view_row_clicked_no_groups(index)
-
-    def on_column_view_row_clicked_no_groups(self, index):
-        source_index = self.perforce_proxy_model.mapToSource(index)
-        row_number = source_index.row()
-        # logger.debug(f"Clicked Row {row_number}")
-        item = self.column_view_model.item(row_number, 14)  # Get the publish id from the 14th column
-        if item:
-            data = item.text()
-            # Perform actions with the data from the clicked row
-            # logger.debug(f"Clicked Row {row_number}, Data: {data}")
-            if data and data != "N/A":
-                id = int(data)
-                self._setup_column_details_panel(id)
-
-    def on_column_view_row_clicked_group(self, index):
-        id_role = QtCore.Qt.UserRole + 1  # Custom role for "id"
-
-        # Get the clicked item's index
-        source_index = self.perforce_proxy_model.mapToSource(index)
-        if source_index.isValid():
-            # Get the "id" data from the custom role
-            id = source_index.data(id_role)
-            if id:
-                id = int(id)
-                # logger.debug(">>>>>>>>>>  id is: {}".format(id))
-                # Perform actions using the retrieved "id"
-                self._setup_column_details_panel(id)
-
-
-
-    def _get_perforce_size(self, sg_data):
-        """
-        Get Perforce file size.
-        """
-        try:
-            self._size_dict = {}
-            for key in self._item_path_dict:
-                if key:
-                    #logger.debug(">>>>>>>>>>  key is: {}".format(key))
-                    key = self._convert_local_to_depot(key).rstrip('/')
-                    # Get the file size from Perforce for all revisions
-                    #fstat_list = self._p4.run("fstat", "-T", "fileSize, clientFile, headRev", "-Of", "-Ol", key + '/...')
-                    # Get the file size from Perforce
-                    fstat_list = self._p4.run("fstat", "-T", "fileSize, clientFile", "-Ol", key + '/...')
-                    #logger.debug(">>>>>>>>>>  fstat_list is: {}".format(fstat_list))
-                    for fstat in fstat_list:
-                        #if isinstance(fstat, list) and len(fstat) == 1:
-                        #    fstat = fstat[0]
-                        # logger.debug(">>>>>>>>>>  fstat is: {}".format(fstat))
-                        if fstat:
-                            size = fstat.get("fileSize", "N/A")
-                            if size != "N/A":
-                                size = "{:.2f}".format(int(size) / 1024 / 1024)
-                                size = float(size)
-                                # logger.debug(">>>>>>>>>>  size is: {}".format(size))
-                            client_file = fstat.get('clientFile', None)
-
-                            if client_file:
-                                newkey = self._create_key(client_file)
-                                #head_rev = fstat.get('headRev', "0")
-                                #newkey = "{}#{}".format(newkey, head_rev)
-                                if newkey:
-                                    if newkey not in self._size_dict:
-                                        self._size_dict[newkey] = {}
-                                    self._size_dict[newkey]['fileSize'] = size
-                    # logger.debug(">>>>>>>>>>  self._size_dict is: {}".format(self._size_dict))
-
-                    for i, sg_item in enumerate(sg_data):
-
-                        if "path" in sg_item:
-                            if "local_path" in sg_item["path"]:
-                                local_path = sg_item["path"].get("local_path", None)
-                                modified_local_path = self._create_key(local_path)
-
-                                if modified_local_path and modified_local_path in self._size_dict:
-                                    if 'fileSize' in self._size_dict[modified_local_path]:
-                                        sg_item["fileSize"] = self._size_dict[modified_local_path].get('fileSize', None)
-                                # logger.debug(">>>>>>>>>>  sg_item is: {}".format(sg_item))
-            # logger.debug(">>>>>>>>>>  sg_data is: {}".format(sg_data))
-        except Exception as e:
-            logger.debug("Error getting Perforce file size: {}".format(e))
-            pass
-        return sg_data
-
-
-
-    def _insert_perforce_row(self, row, data, sg_item):
-        tooltip = self._get_tooltip(data, sg_item)
-        for col, value in enumerate(data):
-            item = QStandardItem(str(value))
-            item.setToolTip(tooltip)
-            if col == 5:
-                item.setData(value, Qt.DisplayRole)
-            if col == 2:
-                action = data[2]
-                # action_icon, icon_path = get_action_icon(action)
-                action_icon = self.actions_icons.get_icon_pixmap(action)
-                if action_icon:
-                    item.setIcon(action_icon)
-
-            self.column_view_model.setItem(row, col, item)
-
-
-    def print_selected_row(self):
-        # Get the selected indexes from the column view
-        selected_indexes = self.ui.column_view.selectionModel().selectedRows()
-
-        if selected_indexes:
-            for index in selected_indexes:
-                row_number = index.row()
-                print(f"Selected Row {row_number + 1}:")
-                # You can access the data in each column of the selected row like this:
-                for col in range(self.column_view_model.columnCount()):
-                    item = self.column_view_model.item(row_number, col)
-                    print(f"Column {col + 1}: {item.text()}")
-        else:
-            print("No rows selected.")
-
-    def _on_column_model_action(self, action):
-        if self._set_groups:
-            self._on_column_model_action_groups(action)
-        else:
-            self._on_column_model_action_no_groups(action)
-
-    def _on_column_model_action_no_groups(self, action):
-
-        selected_actions = []
-        selected_files_to_revert = []  # Keep this for the revert action
-        selected_files_to_sync = []  # Add this for the sync action
-
-        selected_indexes = self.ui.column_view.selectionModel().selectedRows()
-        for selected_index in selected_indexes:
-
-            source_index = self.perforce_proxy_model.mapToSource(selected_index)
-            selected_row_data = self.get_row_data_from_source(source_index)
-            id_val = 0  # Renamed from id to avoid conflict with built-in
-            if (len(selected_row_data) >= 15):
-                id_val = selected_row_data[14]
-
-            sg_item = self._column_view_dict.get(int(id_val), None)
-            # logger.debug("selected_row_data: {}".format(selected_row_data))
-
-            if sg_item and "path" in sg_item:  # Ensure sg_item is not None before accessing
-                if "local_path" in sg_item["path"]:
-                    target_file = sg_item["path"].get("local_path", None)
-                    depot_file = sg_item.get("depotFile", None)
-
-                    if action in ["add", "move/add", "edit", "delete"]:
-                        sg_item_action = sg_item.get("action", None)
-                        if sg_item_action and sg_item_action == "delete":
-                            msg = "Cannot perform the action on the file {} as it has already been marked for deletion or is deleted.".format(
-                                depot_file)
-
-                            self._add_log(msg, 2)
-                            continue  # Skip to the next selected_index
-
-                        if action == "delete":
-                            msg = "Marking file {} for deletion ...".format(depot_file)
-                        else:
-                            msg = "{} file {}".format(action, depot_file)
-                        self._add_log(msg, 2)
-                        selected_actions.append((sg_item, action))
-
-                    elif action == "revert":
-                        # Collect files to revert instead of reverting immediately
-                        if target_file:
-                            selected_files_to_revert.append(target_file)
-                            msg = "Preparing to revert file {} ...".format(target_file)
-                            self._add_log(msg, 3)
-
-                    elif action == "sync":
-                        # Collect files to sync
-                        #logger.info(f"sync action ...")
-                        #logger.info(f"target file: {target_file}")
-                        #logger.info(f"sg_item: {sg_item}")
-                        if target_file:
-                            selected_files_to_sync.append(target_file)
-                            msg = "Preparing to sync file {} ...".format(target_file)
-                            self._add_log(msg, 3)
-                        else:
-                            msg = "Unable to sync file {} ...".format(target_file)
-                            self._add_log(msg, 3)
-
-
-
-        # --- Perform bulk revert after the loop ---
-        if action == "revert" and selected_files_to_revert:
-            try:
-                msg = f"Reverting {len(selected_files_to_revert)} selected file(s)..."
-                self._add_log(msg, 2)
-                # Use argument unpacking (*) to pass all files at once
-                p4_result = self._p4.run("revert", *selected_files_to_revert)
-                logger.debug(f"Bulk revert result: {p4_result}")
-                if p4_result:  # Check if the command was successful (might need adjustment based on p4python output)
-                    self.refresh_publish_data()  # Refresh data once after bulk operation
-            except Exception as e:
-                logger.error(f"Error during bulk revert: {e}")
-                self._add_log(f"Error during bulk revert: {e}", 2)  # Show error in log window
-
-        # --- Perform bulk sync after the loop ---
-        if action == "sync" and selected_files_to_sync:
-            try:
-                msg = f"Syncing {len(selected_files_to_sync)} selected file(s)..."
-                self._add_log(msg, 2)
-                self._do_sync_files_threading_thread_2(selected_files_to_sync)
-                # After syncing, refresh the data
-                #self.refresh_publish_data()
-                self._refresh_column_view()
-                #self._populate_column_view_widget()
-                # or self._set_column_view_mode()
-                msg = f"Syncing of {len(selected_files_to_sync)} file(s) complete."
-                self._add_log(msg, 2)
-            except Exception as e:
-                logger.error(f"Error during bulk sync: {e}")
-                self._add_log(f"Error during bulk sync: {e}", 2)
-
-        if selected_actions:
-            self.perform_changelist_selection(selected_actions)
-
-    def _on_column_model_action_groups(self, action):
-        selected_actions = []
-        selected_files_to_revert = []
-        selected_files_to_sync = []
-        selected_indexes = self.ui.column_view.selectionModel().selectedRows()
-
-        # Define the custom role for "id"
-        id_role = QtCore.Qt.UserRole + 1
-
-        for selected_index in selected_indexes:
-            source_index = self.perforce_proxy_model.mapToSource(selected_index)
-            if source_index.isValid():
-                # Get the "id" data from the custom role
-                id = source_index.data(id_role)
-                if id is not None:
-                    id = int(id)
-
-                    sg_item = self._column_view_dict.get(id, None)
-                    # logger.debug("Selected item's id: {}".format(id))
-
-                    if "path" in sg_item:
-                        if "local_path" in sg_item["path"]:
-                            target_file = sg_item["path"].get("local_path", None)
-                            depot_file = sg_item.get("depotFile", None)
-
-                            if action in ["add", "move/add", "edit", "delete"]:
-                                sg_item_action = sg_item.get("action", None)
-                                if sg_item_action and sg_item_action == "delete":
-                                    msg = "Cannot perform the action on the file {} as it has already been marked for deletion or is deleted.".format(
-                                        depot_file)
-                                    self._add_log(msg, 2)
-
-                                if action == "delete":
-                                    msg = "Marking file {} for deletion ...".format(depot_file)
-                                else:
-                                    msg = "{} file {}".format(action, depot_file)
-                                self._add_log(msg, 2)
-                                selected_actions.append((sg_item, action))
-
-
-                            elif action == "revert":
-                                # Collect files to revert instead of reverting immediately
-                                if target_file:
-                                    selected_files_to_revert.append(target_file)
-                                    msg = "Preparing to revert file {} ...".format(target_file)
-                                    self._add_log(msg, 3)
-                            elif action == "sync":
-                                # Collect files to sync instead of reverting immediately
-                                if target_file:
-                                    selected_files_to_sync.append(target_file)
-                                    msg = "Preparing to sync file {} ...".format(target_file)
-                                    self._add_log(msg, 3)
-                                else:
-                                    msg = "Unable to sync file {} ...".format(target_file)
-                                    self._add_log(msg, 3)
-
-
-        # --- Perform bulk revert after the loop ---
-        if action == "revert" and selected_files_to_revert:
-            try:
-                msg = f"Reverting {len(selected_files_to_revert)} selected file(s)..."
-                self._add_log(msg, 2)
-                # Use argument unpacking (*) to pass all files at once
-                p4_result = self._p4.run("revert", *selected_files_to_revert)
-                logger.debug(f"Bulk revert result: {p4_result}")
-                if p4_result:  # Check if the command was successful (might need adjustment based on p4python output)
-                    self.refresh_publish_data()  # Refresh data once after bulk operation
-            except Exception as e:
-                logger.error(f"Error during bulk revert: {e}")
-                self._add_log(f"Error during bulk revert: {e}", 2)  # Show error in log window
-
-        if action == "sync" and selected_files_to_sync:
-            try:
-                msg = f"Syncing {len(selected_files_to_sync)} selected file(s)..."
-                self._add_log(msg, 2)
-                self._do_sync_files_threading_thread_2(selected_files_to_sync)
-                # After syncing, refresh the data
-                #self.refresh_publish_data()
-                self._refresh_column_view()
-                #self._populate_column_view_widget()
-                # or self._set_column_view_mode()
-                msg = f"Syncing of {len(selected_files_to_sync)} file(s) complete."
-                self._add_log(msg, 2)
-            except Exception as e:
-                logger.error(f"Error during bulk sync: {e}")
-                self._add_log(f"Error during bulk sync: {e}", 2)
-
-        if selected_actions:
-            self.perform_changelist_selection(selected_actions)
-
-
-    def _get_tooltip(self, data, sg_item):
-        """
-        Gets a tooltip for this model item.
-
-        :param item: ShotgunStandardItem associated with the publish.
-        :param sg_item: Publish information from Shotgun.
-        """
-        #logger.debug(">>>>>>>>>>>> _set_tooltip: data: {}".format(data))
-        #logger.debug(">>>>>>>>>>>> _set_tooltip: sg_item: {}".format(sg_item))
-        tooltip = ""
-        if not sg_item or not data:
-            return tooltip
-        tooltip += "<b>Name:</b> %s" % (sg_item.get("code") or "No name given.")
-
-        # Version 012 by John Smith at 2014-02-23 10:34
-
-        published_file_type = sg_item.get('type', None)
-        if published_file_type in ['PublishedFile'] and data and len(data) >= 12:
-            if sg_item.get("headAction"):
-                tooltip += "<br><br><b>Head action:</b> %s" % (
-                        sg_item.get("headAction") or "N/A"
-                )
-            if sg_item.get("action"):
-                tooltip += "<br><br><b>Action:</b> %s" % (
-                        sg_item.get("action") or "N/A"
-                )
-
-            tooltip += "<br><br><b>Revision:</b> #%s" % (
-                    sg_item.get("revision") or "N/A"
-            )
-
-            tooltip += "<br><br><b>Size:</b> %s MB" % (
-                (sg_item.get("fileSize") or "0")
-            )
-
-            tooltip += "<br><br><b>File Extension:</b> %s" % (
-                (data[6] or "N/A")
-            )
-            tooltip += "<br><br><b>File Type:</b> %s" % (
-                (data[7] or "N/A")
-            )
-
-            if not isinstance(sg_item.get("created_at"), datetime.datetime):
-                created_unixtime = sg_item.get("created_at") or 0
-                date_str = datetime.datetime.fromtimestamp(created_unixtime).strftime(
-                    "%Y-%m-%d %H:%M"
-                )
-            else:
-                date_str = sg_item.get("created_at").strftime("%Y-%m-%d %H:%M")
-
-            # created_by is set to None if the user has been deleted.
-            if sg_item.get("created_by") and sg_item["created_by"].get("name"):
-                author_str = sg_item["created_by"].get("name")
-            else:
-                author_str = "Unspecified User"
-
-            version = sg_item.get("version_number")
-            vers_str = "%03d" % version if version is not None else "N/A"
-
-            tooltip += "<br><br><b>Version:</b> %s by %s at %s" % (
-                vers_str,
-                author_str,
-                date_str,
-            )
-
-        tooltip += "<br><br><b>Task Name:</b> %s" % (
-            (data[9] or "N/A")
-        )
-
-        tooltip += "<br><br><b>Task Status:</b> %s" % (
-            (data[10] or "N/A")
-        )
-
-        tooltip += "<br><br><b>Path:</b> %s" % (
-            (sg_item.get("path") or {}).get("local_path")
-        )
-        tooltip += "<br><br><b>Publish ID:</b> %s" % (
-                sg_item.get("id") or "0"
-        )
-        tooltip += "<br><br><b>Description:</b> %s" % (
-            sg_item.get("description") or "No description given."
-        )
-
-
-        if sg_item.get("headChange"):
-            tooltip += "<br><br><b>Head change:</b> %s" % (
-                    sg_item.get("headChange") or "N/A"
-            )
-        if sg_item.get("change"):
-            tooltip += "<br><br><b>Change:</b> %s" % (
-                    sg_item.get("change") or "N/A"
-            )
-
-        if sg_item.get("entity"):
-            entity = sg_item.get("entity")
-            if entity:
-                entity_name = entity.get("name", "N/A")
-                tooltip += "<br><br><b>Entity:</b> %s" % entity_name
-                entity_id = entity.get("id", "N/A")
-                tooltip += "<br><br><b>Entity ID:</b> %s" % entity_id
-
-        return tooltip
-
-    def _path_difference(self, path1, path2):
-        # Normalize paths to use forward slashes and remove trailing slashes
-        path1 = os.path.normpath(path1)
-        path2 = os.path.normpath(path2)
-        #logger.debug(">>>>>>>>>>>> path1: {}".format(path1))
-        #logger.debug(">>>>>>>>>>>> path2: {}".format(path2))
-        # Split paths into components
-        components1 = path1.split(os.sep)
-        components2 = path2.split(os.sep)
-        #logger.debug(">>>>>>>>>>>> components1: {}".format(components1))
-        #logger.debug(">>>>>>>>>>>> components2: {}".format(components2))
-
-        # Find the common prefix
-        common_prefix = []
-        for component1, component2 in zip(components1, components2):
-            if component1 == component2:
-                common_prefix.append(component1)
-            else:
-                break
-
-        # Calculate the difference by removing the common prefix
-        #diff1 = components1[len(common_prefix):]
-        diff2 = components2[len(common_prefix):]
-
-        # Combine the difference components into a single path
-        difference = os.sep.join(diff2)
-
-        return difference
-
-    def _print_sg_item(self, sg_item):
-        for key, value in sg_item.items():
-            msg = "{}: {}".format(key, value)
-            logger.debug(msg)
-
-    def _get_publish_icons(self):
-        """
-        Get the icons for the publish view based on the data prepared for the column view.
-        Attempts to retrieve icons from the SgLatestPublishModel.
-        """
-        self._publish_icons = {}
-
-
-        publish_model = self._publish_model # Direct reference to the source model
-
-        if not publish_model:
-            logger.warning("Cannot get publish icons: SgLatestPublishModel not available.")
-            return
-
-        # Create a mapping from ShotGrid publish ID to source model index
-        id_to_source_index = {}
-        for row in range(publish_model.rowCount()):
-             source_index = publish_model.index(row, 0)
-             item = publish_model.itemFromIndex(source_index)
-             if item:
-                 sg_item = item.get_sg_data()
-                 if sg_item:
-                     item_id = sg_item.get("id")
-                     if item_id:
-                         id_to_source_index[item_id] = source_index
-
-        # Iterate through our column view data and find matching icons
-        for item_key, sg_item_col_view in self._column_view_dict.items():
-            # Try to find the corresponding item in the publish_model using the ID
-            item_id = sg_item_col_view.get("id") # ID should be present from the merge
-            source_index = id_to_source_index.get(item_id) if item_id else None
-
-            if source_index:
-                item = publish_model.itemFromIndex(source_index)
-                if item:
-                    icon = item.icon()
-                    # Check if icon is valid and not null before storing
-                    if icon and not icon.isNull():
-                         # Use the item_key used in _populate_column_view_widget
-                         self._publish_icons[item_key] = icon
-                         # logger.debug(f"Found icon for item key {item_key} (ID: {item_id})")
-            # else:
-                 # logger.debug(f"Could not find matching item in publish_model for key {item_key} (ID: {item_id})")
-
-        logger.debug(f"Collected {len(self._publish_icons)} icons.")
-
-    def _setup_column_details_panel(self, id):
-        """
-        Sets up the file details panel with info for a given column view row.
-        """
-
-        def __make_table_row(left, right):
-            """
-            Helper method to make a detail table row
-            """
-            return (
-                "<tr><td><b style='color:#2C93E2'>%s</b>&nbsp;</td><td>%s</td></tr>"
-                % (left, right)
-            )
-
-        def __set_publish_ui_visibility(is_publish):
-            """
-            Helper method to enable disable publish specific details UI
-            """
-            # disable version file_history stuff
-            self.ui.version_file_history_label.setEnabled(is_publish)
-            self.ui.file_history_view.setEnabled(is_publish)
-
-            # hide actions and playback stuff
-            self.ui.file_detail_actions_btn.setVisible(is_publish)
-            self.ui.file_detail_playback_btn.setVisible(is_publish)
-
-
-        def __clear_publish_file_history(pixmap):
-            """
-            Helper method that clears the file_history view on the right hand side.
-
-            :param pixmap: image to set at the top of the file_history view.
-            """
-            self._publish_file_history_model.clear()
-            self.ui.file_details_header.setText("")
-            self.ui.file_details_image.setPixmap(pixmap)
-            __set_publish_ui_visibility(False)
-
-        # note - before the UI has been shown, querying isVisible on the actual
-        # widget doesn't work here so use member variable to track state instead
-        if not self._details_pane_visible:
-            logger.debug("Detailed pan is not visible")
-            return
-
-        selected_indexes = self.ui.column_view.selectionModel().selectedRows()
-        if selected_indexes and len(selected_indexes) > 1:
-            logger.debug("More than one row selected")
-            __clear_publish_file_history(self._multiple_publishes_pixmap)
-            return
-
-        if id == 0:
-            logger.debug("ID is 0")
-            __clear_publish_file_history(self._no_selection_pixmap)
-
-        else:
-            if id not in self._column_view_dict:
-                logger.debug("id is not available in the column view")
-                __clear_publish_file_history(self._no_selection_pixmap)
-                __set_publish_ui_visibility(False)
-                return
-            else:
-
-                sg_item = self._column_view_dict[id]
-                if not sg_item:
-                    logger.debug("sg_item is empty")
-                    __clear_publish_file_history(self._no_selection_pixmap)
-                    __set_publish_ui_visibility(False)
-                    return
-                publish_type = sg_item.get("type", None)
-                if publish_type not in ["PublishedFile"]:
-                    logger.debug("Type is not PublishedFile")
-                    __clear_publish_file_history(self._no_selection_pixmap)
-                    __set_publish_ui_visibility(False)
-                    return
-
-                __set_publish_ui_visibility(True)
-
-                if self._publish_icons and id in self._publish_icons:
-                    thumb_pixmap = self._publish_icons[id].pixmap(512)
-                    self.ui.file_details_image.setPixmap(thumb_pixmap)
-
-                # sort out the actions button
-                actions = self._action_manager.get_actions_for_publish(
-                    sg_item, self._action_manager.UI_AREA_DETAILS
-                )
-                if len(actions) == 0:
-                    self.ui.file_detail_actions_btn.setVisible(False)
-                else:
-                    self.ui.file_detail_playback_btn.setVisible(True)
-                    self._file_details_action_menu.clear()
-                    for a in actions:
-                        self._dynamic_widgets.append(a)
-                        self._file_details_action_menu.addAction(a)
-
-                # if there is an associated version, show the play button
-                if sg_item.get("version"):
-                    sg_url = sgtk.platform.current_bundle().shotgun.base_url
-                    url = "%s/page/media_center?type=Version&id=%d" % (
-                        sg_url,
-                        sg_item["version"]["id"],
-                    )
-
-                    self.ui.file_detail_playback_btn.setVisible(True)
-                    self._current_version_detail_playback_url = url
-                else:
-                    self.ui.file_detail_playback_btn.setVisible(False)
-                    self._current_version_detail_playback_url = None
-
-                if sg_item.get("name") is None:
-                    name_str = "No Name"
-                else:
-                    name_str = sg_item.get("name")
-
-                #type_str = shotgun_model.get_sanitized_data(
-                #    item, SgLatestPublishModel.PUBLISH_TYPE_NAME_ROLE
-                #)
-                type_str = sg_item.get("type")
-                msg = ""
-                msg += __make_table_row("Name", name_str)
-                msg += __make_table_row("Type", type_str)
-
-                version = sg_item.get("version_number")
-                vers_str = "%03d" % version if version is not None else "N/A"
-
-                msg += __make_table_row("Version", "%s" % vers_str)
-
-                if sg_item.get("entity"):
-                    display_name = shotgun_globals.get_type_display_name(
-                        sg_item.get("entity").get("type")
-                    )
-                    entity_str = "<b>%s</b> %s" % (
-                        display_name,
-                        sg_item.get("entity").get("name"),
-                    )
-                    msg += __make_table_row("Link", entity_str)
-
-                # sort out the task label
-                if sg_item.get("task"):
-
-                    if sg_item.get("task.Task.content") is None:
-                        task_name_str = "Unnamed"
-                    else:
-                        task_name_str = sg_item.get("task.Task.content")
-
-                    if sg_item.get("task.Task.sg_status_list") is None:
-                        task_status_str = "No Status"
-                    else:
-                        task_status_code = sg_item.get("task.Task.sg_status_list")
-                        task_status_str = self._status_model.get_long_name(
-                            task_status_code
-                        )
-
-                    msg += __make_table_row(
-                        "Task", "%s (%s)" % (task_name_str, task_status_str)
-                    )
-
-                # if there is a version associated, get the status for this
-                if sg_item.get("version.Version.sg_status_list"):
-                    task_status_code = sg_item.get("version.Version.sg_status_list")
-                    task_status_str = self._status_model.get_long_name(task_status_code)
-                    msg += __make_table_row("Review", task_status_str)
-
-                if sg_item.get("revision"):
-                    revision = sg_item.get("revision")
-                    msg += __make_table_row("Revision#", revision)
-
-                if sg_item.get("action"):
-                    action = sg_item.get("action")
-                    msg += __make_table_row("Action", action)
-                else:
-                    if sg_item.get("headAction"):
-                        head_action = sg_item.get("headAction", "N/A")
-                        msg += __make_table_row("Action", head_action)
-
-
-                self.ui.file_details_header.setText("<table>%s</table>" % msg)
-
-                # tell details pane to load stuff
-                self._publish_file_history_model.load_data(sg_item)
-
-            self.ui.file_details_header.updateGeometry()
-    #############################################################################################################
-
     def _populate_submitted_widget(self):
-
-        self.ui.submitted_scroll.setVisible(True)
-        self._reset_submitted_widget()
-        msg = "\n <span style='color:#2C93E2'>Updating data ...</span> \n"
-        self._add_log(msg, 2)
-        #logger.debug(">>>>>>>>>>  update_fstat_data...")
-        self._update_fstat_data()
-        # logger.debug(">>>>>>>>>>  Updating self._fstat_dict is: {}")
-        # for key, sg_item in self._fstat_dict.items():
-        #    logger.debug("{}:{}".format(key, sg_item))
-        #logger.debug(">>>>>>>>>>  fix_fstat_dict...")
-        self._fix_fstat_dict()
-
-        length = len(self._fstat_dict)
-        if length > 0:
-            msg = "\n <span style='color:#2C93E2'>Populating the submitted view with {} files. Please wait...</span> \n".format(
-                length)
-            self._add_log(msg, 2)
-            self.submitted_tree_view = TreeViewWidget(data_dict=self._fstat_dict, sorted=False, mode="submitted",
-                                                      p4=self._p4)
-            self.submitted_tree_view.populate_treeview_widget_submitted()
-            publish_widget = self.submitted_tree_view.get_treeview_widget()
-
-            # Submitted Scroll Area
-            self.ui.submitted_scroll.setWidget(publish_widget)
-            # self.ui.submitted_scroll.setVisible(True)
-            #logger.debug(">>> Updating submitted_tree_view is complete")
-
-            msg = "\n <span style='color:#2C93E2'>Select files in the Submitted view then click <i>Fix Selected</i> or click <i>Fix All</i> to publish them using the <i>Shotgrid Publisher</i>...</span> \n"
-            self._add_log(msg, 2)
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.populate_submitted_widget()
 
     def _reset_submitted_widget(self):
-        null_widget = SWCTreeView()
-        self.ui.submitted_scroll.setWidget(null_widget)
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._reset_submitted_widget()
 
     def update_pending_view(self):
-        """
-        Shows the pending view
-        """
-        self._change_dict = {}
-        self._get_default_changelists()
-        self._get_pending_changelists()
-
-        # publish_widget, self._pending_publish_list = self._create_perforce_ui(self._change_dict, sorted=True)
-        self.pending_tree_view = TreeViewWidget(data_dict=self._change_dict, sorted=True, mode="pending", p4=self._p4)
-        self.pending_tree_view.populate_treeview_widget_pending()
-        publish_widget = self.pending_tree_view.get_treeview_widget()
-        # Pending Scroll Area
-        self.ui.pending_scroll.setWidget(publish_widget)
-
-
-
-    def _turn_all_modes_off(self):
-        self.ui.publish_view.setVisible(False)
-        self.ui.column_view.setVisible(False)
-        self.ui.perforce_scroll.setVisible(False)
-        self.ui.submitted_scroll.setVisible(False)
-        self.ui.pending_scroll.setVisible(False)
-
-        self.ui.thumbnail_mode.setChecked(False)
-        self.ui.list_mode.setChecked(False)
-        self.ui.column_mode.setChecked(False)
-        self.ui.submitted_mode.setChecked(False)
-        self.ui.pending_mode.setChecked(False)
-
-        self.ui.list_mode.setIcon(
-            QIcon(QPixmap(":/res/mode_switch_card.png"))
-        )
-        self.ui.thumbnail_mode.setIcon(
-            QIcon(QPixmap(":/res/mode_switch_thumb.png"))
-        )
-        self.ui.column_mode.setIcon(
-            QIcon(QPixmap(":/res/mode_switch_column.png"))
-        )
-        """
-        self.ui.submitted_mode.setIcon(
-            QIcon(QPixmap(":/res/mode_switch_thumb.png"))
-        )
-        self.ui.pending_mode.setIcon(
-            QIcon(QPixmap(":/res/mode_switch_card.png"))
-        )
-        """
-
-
-        repo_root = os.path.normpath(
-            os.path.join(os.path.dirname(__file__), "..", "..")
-        )
-
-        inactive_column_view_image_path = os.path.join(repo_root, "icons/mode_switch_column_off.png")
-        inactive_column_view_icon = QIcon(QPixmap(inactive_column_view_image_path))
-
-        inactive_submitted_image_path = os.path.join(repo_root, "icons/submitted_off.png")
-        submitted_icon_inactive = QIcon(QPixmap(inactive_submitted_image_path))
-
-        inactive_pending_image_path = os.path.join(repo_root, "icons/pending_off.png")
-        pending_icon_inactive = QIcon(QPixmap(inactive_pending_image_path))
-
-        perforce_publish_image_path = os.path.join(repo_root, "icons/perforce_1.png")
-        perforce_publish_icon = QIcon(QPixmap(perforce_publish_image_path))
-
-        self.ui.column_mode.setIcon(inactive_column_view_icon)
-        self.ui.submitted_mode.setIcon(submitted_icon_inactive)
-        self.ui.pending_mode.setIcon(pending_icon_inactive)
-        self._show_thumb_scale(False)
-
-    def _show_thumb_scale(self, is_visible):
-        """
-        Shows or hides the scale widgets.
-
-        :param bool is_visible: If True, scale slider will be shown.
-        """
-        self.ui.thumb_scale.setVisible(is_visible)
-        self.ui.scale_label.setVisible(is_visible)
-
-    def _toggle_details_pane(self):
-        """
-        Executed when someone clicks the show/hide details button
-        """
-        if self.ui.details_tab.isVisible():
-            self._set_details_pane_visiblity(False)
-        else:
-            self._set_details_pane_visiblity(True)
-
-    def _set_details_pane_visiblity(self, visible):
-        """
-        Specifies if the details pane should be visible or not
-        """
-        # store our value in a setting
-        self._settings_manager.store("show_details", visible)
-
-        if visible == False:
-            # hide details pane
-            self._details_pane_visible = False
-            self.ui.details_tab.setVisible(False)
-            self.ui.info.setText("Show Details")
-
-        else:
-            # show details pane
-            self._details_pane_visible = True
-            self.ui.details_tab.setVisible(True)
-            self.ui.info.setText("Hide Details")
-
-            # if there is something selected, make sure the detail
-            # section is focused on this
-            selection_model = self.ui.publish_view.selectionModel()
-
-            self._setup_file_details_panel(selection_model.selectedIndexes())
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.update_pending_view()
 
     def _setup_entity_details_panel(self, entity_data, item):
         """
@@ -4523,46 +2006,11 @@ class AppDialog(QWidget):
         :param entity_data:
         :return:
         """
-        self.entity_parents = []
-        if entity_data:
-            entity_id = entity_data.get("id", None)
-            entity_type = entity_data.get("type", None)
-            if "entity" in entity_data:
-                entity_info = entity_data.get("entity", None)
-                if entity_info:
-                    # get the entity id
-                    entity_id = entity_info.get("id", None)
-                    # get the entity type
-                    entity_type =entity_info.get("type", None)
-
-
-            if entity_id and entity_type:
-                filters = [["id", "is", entity_id]]
-                fields = ["id", "code", "type", "parents", "sg_asset_parent", "project", "sg_status_list"]
-                #fields = ["id", "code", "type", "parents", "sg_asset_parent", "sg_assets", "project",
-                #          "sg_asset_library", "asset_section", "asset_category", "sg_asset_type", "sg_status_list"]
-
-                # get the entity
-                published_entities = self._app.shotgun.find(entity_type, filters, fields)
-
-                #logger.debug(">>>>>>>>>>> Published entity: %s" % published_entities)
-                for published_entity in published_entities:
-                    # get the asset parent
-                    asset_parent = published_entity.get("sg_asset_parent", None)
-                    #logger.debug(">>>>>>>>>>>sg_asset_parent: %s" % asset_parent)
-                    if asset_parent:
-                        self.entity_parents.append(asset_parent)
-                    # get the parents
-                    linked_assets = published_entity.get("parents", None)
-                    if linked_assets:
-                        for parent in linked_assets:
-                            self.entity_parents.append(parent)
-
-                #logger.debug(">>>>>>>>>>>Parents: %s" % self.entity_parents)
-                for entity_parent in self.entity_parents:
-                    entity_path, entity_id, entity_type = self._get_entity_info(entity_parent)
-                    entity_parent["entity_path"] = entity_path
-                logger.debug("Parents with paths: %s" % self.entity_parents)
+        self.entity_parents = self._sync_manager.get_entity_parents(entity_data, self._app)
+        for entity_parent in self.entity_parents:
+            entity_path, entity_id, entity_type = self._get_entity_info(entity_parent)
+            entity_parent["entity_path"] = entity_path
+        logger.debug("Parents with paths: %s" % self.entity_parents)
 
 
     def _setup_entity_parent_and_children(self, entity_data):
@@ -4772,135 +2220,17 @@ class AppDialog(QWidget):
         # logger.debug(">>>>>>>>>>> Entity children Published Files: %s" % self.entity_children_published_files_list)
         return self.entity_children_published_files_list
 
-    def _prepare_entity_parents_published_files(self):
-        """ Sync the published files for the parents of the selected entity"""
-        self._get_parents_publish_files()
-        # logger.debug(">>>>>>>>>>> Entity parents Published Files: {}".format(self.entity_parents_published_files_list))
-        files_to_sync = []
-        msg = "\n <span style='color:#2C93E2'>Preparing entity parents files...</span> \n"
-        self._add_log(msg, 2)
-        for published_file in self.entity_parents_published_files_list:
-            if 'path' in published_file:
-                local_path = published_file['path'].get('local_path', None)
-                if local_path in files_to_sync:
-                    continue
-                if local_path:
-                    head_rev = published_file.get('headRev', None)
-                    have_rev = published_file.get('haveRev', None)
-                    try:
-                        code = published_file.get('code', None)
-                        if code:
-                            code = code.split("#")[-1]
-                        msg = "Checking file {}#{}".format(local_path, code)
-                        # msg = "Checking file {}".format(local_path)
-                        self._add_log(msg, 4)
-                    except:
-                        pass
-
-                    # logger.debug(">>>>>>>>>>> (1) head_rev:{} have_rev:{}".format(head_rev, have_rev))
-                    if not head_rev and not have_rev:
-                        # fstat_list = self._p4.run_fstat(local_path + '/...')
-                        fstat_list = self._p4.run_fstat(local_path)
-                        if isinstance(fstat_list, list) and fstat_list:
-                            for file_info in fstat_list:
-                                if not isinstance(file_info, dict):
-                                    continue
-                                if file_info:
-                                    if isinstance(file_info, list) and len(file_info) == 1:
-                                        file_info = file_info[0]
-                                    head_rev = file_info.get('headRev', None)
-                                    have_rev = file_info.get('haveRev', None)
-                                    published_file["headRev"] = head_rev
-                                    published_file["haveRev"] = have_rev
-                    if head_rev:
-                        if not have_rev:
-                            have_rev = "0"
-                        if self._to_sync(have_rev, head_rev):
-                            if local_path not in files_to_sync:
-                                files_to_sync.append(local_path)
-
-
-        return files_to_sync
-
     def _sync_entity_parents_published_files(self):
-        """ Sync the published files for the parents of the selected entity"""
-        files_to_sync = self._prepare_entity_parents_published_files()
-        logger.debug(">>>>>>>>>>> Parent files to sync:{}".format(files_to_sync))
-
-        files_to_sync_count = len(files_to_sync)
-        if files_to_sync_count == 0:
-            msg = "\n <span style='color:#2C93E2'>No file sync required for entity parents.</span> \n"
-            self._add_log(msg, 2)
-
-        elif files_to_sync_count > 0:
-
-            msg = "\n <span style='color:#2C93E2'>Syncing {} published files of entity parents.... </span> \n".format(files_to_sync_count)
-            self._add_log(msg, 2)
-            self._do_sync_files_threading_thread_2(files_to_sync, entity=True)
-
-            msg = "\n <span style='color:#2C93E2'>Syncing entity parents published files is complete</span> \n"
-            self._add_log(msg, 2)
-
-    def _prepare_entity_children_published_files(self):
-        """ Sync the published files for the children of the selected entity"""
-        self._get_children_publish_files()
-        files_to_sync = []
-        msg = "\n <span style='color:#2C93E2'>Preparing entity children files...</span> \n"
-        self._add_log(msg, 2)
-        for published_file in self.entity_children_published_files_list:
-            if 'path' in published_file:
-                local_path = published_file['path'].get('local_path', None)
-                if local_path:
-                    msg = "Checking file {}".format(local_path)
-                    self._add_log(msg, 4)
-                    head_rev = published_file.get('headRev', None)
-                    have_rev = published_file.get('haveRev', None)
-                    # logger.debug(">>>>>>>>>>> (1) head_rev:{} have_rev:{}".format(head_rev, have_rev))
-                    if not head_rev and not have_rev:
-                        # fstat_list = self._p4.run_fstat(local_path + '/...')
-                        fstat_list = self._p4.run_fstat(local_path)
-                        if isinstance(fstat_list, list) and fstat_list:
-                            for file_info in fstat_list:
-                                if not isinstance(file_info, dict):
-                                    continue
-                                if file_info:
-                                    if isinstance(file_info, list) and len(file_info) == 1:
-                                        file_info = file_info[0]
-                                    head_rev = file_info.get('headRev', None)
-                                    have_rev = file_info.get('haveRev', None)
-                                    published_file["headRev"] = head_rev
-                                    published_file["haveRev"] = have_rev
-                    if head_rev:
-                        if not have_rev:
-                            have_rev = "0"
-                        if self._to_sync(have_rev, head_rev):
-                            files_to_sync.append(local_path)
-
-        return files_to_sync
+        """Sync the published files for the parents of the selected entity."""
+        self._sync_manager.sync_entity_parents_published_files(self.entity_parents, self._app)
 
     def _sync_entity_children_published_files(self):
-        """ Sync the published files for the children of the selected entity"""
-        files_to_sync = self._prepare_entity_children_published_files()
-
-        files_to_sync_count = len(files_to_sync)
-        if files_to_sync_count == 0:
-            msg = "\n <span style='color:#2C93E2'>No file sync required for entity children.</span> \n"
-            self._add_log(msg, 2)
-
-        elif files_to_sync_count > 0:
-            msg = "\n <span style='color:#2C93E2'>Syncing {} published files of entity children.... </span> \n".format(files_to_sync_count)
-            self._add_log(msg, 2)
-            self._do_sync_files_threading_thread_2(files_to_sync, entity=True)
-
-            msg = "\n <span style='color:#2C93E2'>Syncing entity children published files is complete</span> \n"
-            self._add_log(msg, 2)
+        """Sync the published files for the children of the selected entity."""
+        self._sync_manager.sync_entity_children_published_files(self.entity_children, self._app)
 
     def _on_sync_entity_files(self):
-        """
-        Callback method when the sync entity files button is clicked
-        """
-        self._sync_entity_parents_published_files()
-        self._sync_entity_children_published_files()
+        """Callback method when the sync entity files button is clicked."""
+        self._sync_manager.sync_entity_files(self.entity_parents, self.entity_children, self._app)
 
     def _load_publishes_for_parents_entity(self, sg_data):
         """
@@ -4943,251 +2273,6 @@ class AppDialog(QWidget):
             sg_data, child_folders, show_sub_items, publish_filters
         )
 
-
-    def _setup_file_details_panel(self, items):
-        """
-        Sets up the file details panel with info for a given item.
-        """
-
-        def __make_table_row(left, right):
-            """
-            Helper method to make a detail table row
-            """
-            return (
-                "<tr><td><b style='color:#2C93E2'>%s</b>&nbsp;</td><td>%s</td></tr>"
-                % (left, right)
-            )
-
-        def __set_publish_ui_visibility(is_publish):
-            """
-            Helper method to enable disable publish specific details UI
-            """
-            # disable version file_history stuff
-            self.ui.version_file_history_label.setEnabled(is_publish)
-            self.ui.file_history_view.setEnabled(is_publish)
-
-            # hide actions and playback stuff
-            self.ui.file_detail_actions_btn.setVisible(is_publish)
-            self.ui.file_detail_playback_btn.setVisible(is_publish)
-
-
-        def __clear_publish_file_history(pixmap):
-            """
-            Helper method that clears the file_history view on the right hand side.
-
-            :param pixmap: image to set at the top of the file_history view.
-            """
-            self._publish_file_history_model.clear()
-            self.ui.file_details_header.setText("")
-            self.ui.file_details_image.setPixmap(pixmap)
-            __set_publish_ui_visibility(False)
-
-        # note - before the UI has been shown, querying isVisible on the actual
-        # widget doesn't work here so use member variable to track state instead
-        if not self._details_pane_visible:
-            return
-
-        if len(items) == 0:
-            __clear_publish_file_history(self._no_selection_pixmap)
-        elif len(items) > 1:
-            __clear_publish_file_history(self._multiple_publishes_pixmap)
-        else:
-
-            model_index = items[0]
-            # the incoming model index is an index into our proxy model
-            # before continuing, translate it to an index into the
-            # underlying model
-            proxy_model = model_index.model()
-            source_index = proxy_model.mapToSource(model_index)
-
-            # now we have arrived at our model derived from StandardItemModel
-            # so let's retrieve the standarditem object associated with the index
-            item = source_index.model().itemFromIndex(source_index)
-            published_file_type = None
-            sg_data = item.get_sg_data()
-            if sg_data:
-                published_file_type = sg_data.get('type', None)
-            if published_file_type and published_file_type not in ['PublishedFile']:
-                __clear_publish_file_history(self._no_selection_pixmap)
-                return
-            """
-            if sg_data:
-                # published_file_type = sg_data.get('published_file_type', None)
-                published_file_type = sg_data.get('type', None)
-                logger.debug(">>>>> Type is {}".format(sg_data.get('type', None)))
-                if published_file_type not in ['PublishedFile']:
-                # if not published_file_type:
-                    __clear_publish_file_history(self._no_selection_pixmap)
-                    return
-            """
-            # render out file_details
-            thumb_pixmap = item.icon().pixmap(512)
-            self.ui.file_details_image.setPixmap(thumb_pixmap)
-
-            if sg_data is None:
-                # an item which doesn't have any sg data directly associated
-                # typically an item higher up the tree
-                # just use the default text
-                folder_name = __make_table_row("Name", item.text())
-                self.ui.file_details_header.setText("<table>%s</table>" % folder_name)
-                __set_publish_ui_visibility(False)
-
-            elif item.data(SgLatestPublishModel.IS_FOLDER_ROLE):
-                # folder with sg data - basically a leaf node in the entity tree
-
-                status_code = sg_data.get("sg_status_list")
-                if status_code is None:
-                    status_name = "No Status"
-                else:
-                    status_name = self._status_model.get_long_name(status_code)
-
-                status_color = self._status_model.get_color_str(status_code)
-                if status_color:
-                    status_name = (
-                        "%s&nbsp;<span style='color: rgb(%s)'>&#9608;</span>"
-                        % (status_name, status_color)
-                    )
-
-                if sg_data.get("description"):
-                    desc_str = sg_data.get("description")
-                else:
-                    desc_str = "No description entered."
-
-                msg = ""
-                display_name = shotgun_globals.get_type_display_name(sg_data["type"])
-                msg += __make_table_row(
-                    "Name", "%s %s" % (display_name, sg_data.get("code"))
-                )
-                msg += __make_table_row("Status", status_name)
-                msg += __make_table_row("Description", desc_str)
-                self.ui.file_details_header.setText("<table>%s</table>" % msg)
-
-                # blank out the version file_history
-                __set_publish_ui_visibility(False)
-                self._publish_file_history_model.clear()
-
-            else:
-                # this is a publish!
-                __set_publish_ui_visibility(True)
-
-                sg_item = item.get_sg_data()
-
-                # sort out the actions button
-                actions = self._action_manager.get_actions_for_publish(
-                    sg_item, self._action_manager.UI_AREA_DETAILS
-                )
-                if len(actions) == 0:
-                    self.ui.file_detail_actions_btn.setVisible(False)
-                else:
-                    self.ui.file_detail_playback_btn.setVisible(True)
-                    self._file_details_action_menu.clear()
-                    for a in actions:
-                        self._dynamic_widgets.append(a)
-                        self._file_details_action_menu.addAction(a)
-
-                # if there is an associated version, show the play button
-                if sg_item.get("version"):
-                    sg_url = sgtk.platform.current_bundle().shotgun.base_url
-                    url = "%s/page/media_center?type=Version&id=%d" % (
-                        sg_url,
-                        sg_item["version"]["id"],
-                    )
-
-                    self.ui.file_detail_playback_btn.setVisible(True)
-                    self._current_version_detail_playback_url = url
-                else:
-                    self.ui.file_detail_playback_btn.setVisible(False)
-                    self._current_version_detail_playback_url = None
-
-                if sg_item.get("name") is None:
-                    name_str = "No Name"
-                else:
-                    name_str = sg_item.get("name")
-
-                type_str = shotgun_model.get_sanitized_data(
-                    item, SgLatestPublishModel.PUBLISH_TYPE_NAME_ROLE
-                )
-
-                msg = ""
-                msg += __make_table_row("Name", name_str)
-                msg += __make_table_row("Type", type_str)
-
-                version = sg_item.get("version_number")
-                vers_str = "%03d" % version if version is not None else "N/A"
-
-                msg += __make_table_row("Version", "%s" % vers_str)
-
-                if sg_item.get("entity"):
-                    display_name = shotgun_globals.get_type_display_name(
-                        sg_item.get("entity").get("type")
-                    )
-                    entity_str = "<b>%s</b> %s" % (
-                        display_name,
-                        sg_item.get("entity").get("name"),
-                    )
-                    msg += __make_table_row("Link", entity_str)
-
-                # sort out the task label
-                if sg_item.get("task"):
-
-                    if sg_item.get("task.Task.content") is None:
-                        task_name_str = "Unnamed"
-                    else:
-                        task_name_str = sg_item.get("task.Task.content")
-
-                    if sg_item.get("task.Task.sg_status_list") is None:
-                        task_status_str = "No Status"
-                    else:
-                        task_status_code = sg_item.get("task.Task.sg_status_list")
-                        task_status_str = self._status_model.get_long_name(
-                            task_status_code
-                        )
-
-                    msg += __make_table_row(
-                        "Task", "%s (%s)" % (task_name_str, task_status_str)
-                    )
-
-                # if there is a version associated, get the status for this
-                if sg_item.get("version.Version.sg_status_list"):
-                    task_status_code = sg_item.get("version.Version.sg_status_list")
-                    task_status_str = self._status_model.get_long_name(task_status_code)
-                    msg += __make_table_row("Review", task_status_str)
-
-                if sg_item.get("revision"):
-                    revision = sg_item.get("revision")
-                    msg += __make_table_row("Revision#", revision)
-
-
-                if sg_item.get("action"):
-                    action = sg_item.get("action")
-                    msg += __make_table_row("Action", action)
-                else:
-                    if sg_item.get("headAction"):
-                        head_action = sg_item.get("headAction", "N/A")
-                        msg += __make_table_row("Action", head_action)
-
-
-                self.ui.file_details_header.setText("<table>%s</table>" % msg)
-
-                # tell details pane to load stuff
-                sg_data = item.get_sg_data()
-                self._publish_file_history_model.load_data(sg_data)
-
-            self.ui.file_details_header.updateGeometry()
-
-    def _on_detail_version_playback(self):
-        """
-        Callback when someone clicks the version playback button
-        """
-        # the code that sets up the version button also populates
-        # a member variable which olds the current media center url.
-        if self._current_version_detail_playback_url:
-            QDesktopServices.openUrl(
-                QUrl(self._current_version_detail_playback_url)
-            )
-
-    ########################################################################################
-    # file_history related
 
     def _compute_file_history_button_visibility(self):
         """
@@ -5312,35 +2397,6 @@ class AppDialog(QWidget):
     ########################################################################################
     # filter view
 
-    def _apply_type_filters_on_publishes(self):
-        """
-        Executed when the type listing changes
-        """
-        # go through and figure out which checkboxes are clicked and then
-        # update the publish proxy model so that only items of that type
-        # is displayed
-        sg_type_ids = self._publish_type_model.get_selected_types()
-        show_folders = self._publish_type_model.get_show_folders()
-        self._publish_proxy_model.set_filter_by_type_ids(sg_type_ids, show_folders)
-
-    ########################################################################################
-    # publish view
-
-    def _on_publish_content_change(self):
-        """
-        Triggered when the number of columns in the model is changing
-        """
-        # if no publish items are visible, display not found overlay
-        num_pub_items = self._publish_proxy_model.rowCount()
-
-        if num_pub_items == 0:
-            # show 'nothing found' image
-            self._publish_main_overlay.show_message_pixmap(self._no_pubs_found_icon)
-        else:
-            self._publish_main_overlay.hide()
-
-
-
     def _on_show_subitems_toggled(self):
         """
         Triggered when the show sub items checkbox is clicked
@@ -5373,27 +2429,6 @@ class AppDialog(QWidget):
         item = self._get_selected_entity()
         self._load_publishes_for_entity_item(item)
         # self._get_perforce_summary()
-
-    def _on_thumb_size_slider_change(self, value):
-        """
-        When scale slider is manipulated
-        """
-        self.ui.publish_view.setIconSize(QSize(value, value))
-        self._settings_manager.store("thumb_size_scale", value)
-
-    def _on_publish_selection(self, selected, deselected):
-        """
-        Slot triggered when someone changes the selection in the main publish area
-        """
-        selected_indexes = self.ui.publish_view.selectionModel().selectedIndexes()
-        #logger.debug(">>>>>>>>>>> selected_indexes:{}".format(selected_indexes))
-        if len(selected_indexes) == 0:
-            self._setup_file_details_panel([])
-        else:
-            self._setup_file_details_panel(selected_indexes)
-
-        # emit the selection changed signal:
-        self.selection_changed.emit()
 
     def _on_publish_double_clicked(self, model_index):
         """
@@ -5445,586 +2480,92 @@ class AppDialog(QWidget):
 
 
     def _on_submit_files(self):
-        """
-        When someone clicks on the "Submit Files" button
-        Show the SubmitChangelist Widget
-        """
-        # Clear the pending view widget before using it again
-        #self._clear_pending_view_widget()
-        self.change_sg_item = self._get_submit_changelist_widget_data()
-        if self.change_sg_item and self._submit_widget_dict:
-            self.submitter_widget = SubmitChangelistWidget(parent=self, myp4=self._p4, change_item=self.change_sg_item, file_dict=self._submit_widget_dict)
-            #logger.debug(">>>>>>>>>>> Submit Widget Dict:{}".format(self._submit_widget_dict))
-
-            self.submitter_widget.show()
-        else:
-            msg = "\n <span style='color:#2C93E2'>No files selected for submission.</span> \n"
-            self._add_log(msg, 2)
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._on_submit_files()
 
     def _get_submit_changelist_widget_data(self):
-        """
-        When someone clicks on the "Submit Files" button
-        Show the SubmitChangelist Widget
-        """
-        selected_indexes = self._pending_view_widget.selectionModel().selectedRows()
-        selected_depot_files = []
-        self._submit_widget_dict = {}
-        change_sg_item = None
-
-        for selected_index in selected_indexes:
-            try:
-                source_index = self._pending_view_model.mapToSource(selected_index)
-                change = self._get_change_data_from_source(source_index)
-                logger.debug("-----------------------------------------------")
-                logger.debug(">>>>>>>>>>> change:{}".format(change))
-                change_key = str(change)
-                children = self._change_dict.get(change_key, None)
-                logger.debug(">>>>>>>>>>>change dict:")
-                for k, v in self._change_dict.items():
-                    logger.debug("Change:{} values:{}".format(k, v))
-
-                if children:
-                    for sg_item in children:
-                        # logger.debug(">>>>>>>>>>> sg_item:{}".format(sg_item))
-                        if sg_item:
-                            if 'depotFile' in sg_item:
-                                depot_file = sg_item.get('depotFile', None)
-                                if depot_file and depot_file not in selected_depot_files:
-                                    selected_depot_files.append(depot_file)
-                                    file_info = {}
-                                    file_name, folder, file_type = self._extract_file_info(depot_file)
-                                    action = self._get_action(sg_item)
-                                    file_info["file"] = file_name
-                                    file_info["folder"] = folder
-                                    file_info["type"] = file_type
-                                    file_info["sg_item"] = sg_item
-                                    file_info["pending_action"] = action
-                                    file_info["resolve_status"] = "N/A"
-                                    key = (file_name, folder)
-                                    self._submit_widget_dict[key] = file_info
-                            if 'changeListInfo' in sg_item:
-                                change_sg_item = sg_item
-                                change_sg_item["change"] = change
-
-            except Exception as e:
-                logger.debug("Error getting file info: {}".format(e))
-        logger.debug(">>>>>>>>>>>_submit_widget_dict dict:")
-        for k, v in self._submit_widget_dict.items():
-            logger.debug("Change:{} values:{}".format(k, v))
-        return change_sg_item
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_submit_changelist_widget_data()
 
     def _extract_file_info(self, target_file):
-        # Get file name, extension and folder
-        file_name = os.path.basename(target_file)
-        folder = os.path.dirname(target_file)
-        extension = os.path.splitext(file_name)[1]
-        extension = extension[1:] if extension else "N/A"
-        # logger.debug(">>>>>>>>>>> Extension:{}".format(extension))
-        type = self.settings.get(extension, "N/A")
-        # logger.debug(">>>>>>>>>>> Type:{}".format(type))
-        return file_name, folder, type
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._extract_file_info(target_file)
 
     def _on_submit_changelist(self, submitter_widget):
-        """
-        Callback for the submit button in the SubmitChangelistWidget
-        """
-        description = submitter_widget.changelist_description.toPlainText()
-        selected_files = []
-        for row in range(submitter_widget.files_table_widget.rowCount()):
-            if submitter_widget.files_table_widget.item(row, 0).checkState() == Qt.Checked:
-                file_info = {
-                    "file": submitter_widget.files_table_widget.item(row, 1).text(),
-                    "folder": submitter_widget.files_table_widget.item(row, 2).text(),
-                    "resolve_status": submitter_widget.files_table_widget.item(row, 3).text(),
-                    "type": submitter_widget.files_table_widget.item(row, 4).text(),
-                    "pending_action": submitter_widget.files_table_widget.item(row, 5).text(),
-                }
-                selected_files.append(file_info)
-
-        if not description:
-            QMessageBox.warning(submitter_widget, "Warning", "Changelist description cannot be empty.")
-            return
-
-        if not selected_files:
-            QMessageBox.warning(submitter_widget, "Warning", "No files selected for submission.")
-            return
-
-        # Here you would add the logic to submit the changelist with the selected files and description
-        print(f"Submitting changelist with description: {description}")
-        print("Files to be submitted:")
-        for file_info in selected_files:
-            print(f"- {file_info}")
-
-        # Close the dialog after submission
-        submitter_widget.accept()
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._on_submit_changelist(submitter_widget)
 
     def on_submit_deleted_files(self, change_sg_item, file_info_deleted):
-        """
-        When someone clicks on the "Submit Files" button
-        Send pending files to the Shotgrid Publisher.
-        """
-        selected_files_to_delete = []
-        selected_tuples_to_delete = []
-        selected_tuples_to_publish = []
-        change = change_sg_item.get("change", None)
-        # logger.debug(">>>>>>> on_submit_deleted_files: change:{}".format(change))
-        for file_info in file_info_deleted:
-            target_file = None
-            try:
-                action = file_info.get("pending_action", None)
-                # logger.debug(">>>>>>> on_submit_deleted_files: action:{}".format(action))
-
-                sg_item = file_info.get("sg_item", None)
-                # logger.debug(">>>>>>> on_submit_deleted_files: sg_item:{}".format(sg_item))
-                if sg_item:
-                    target_file = sg_item.get("depotFile", None)
-                    # logger.debug(">>>>>>> on_submit_deleted_files: target_file:{}".format(target_file))
-
-                    if action in ["delete"]:
-                        if target_file not in selected_files_to_delete:
-                            delete_tuple = (change, target_file)
-                            publish_tuple = (change, target_file, action, sg_item)
-                            selected_files_to_delete.append(target_file)
-                            selected_tuples_to_delete.append(delete_tuple)
-                            selected_tuples_to_publish.append(publish_tuple)
-
-            except Exception as e:
-                logger.debug("Error deleting file {}: {}".format(target_file, e))
-
-        if selected_files_to_delete:
-            # logger.debug("_on_submit_deleted_files: selected_files_to_delete: {}".format(selected_files_to_delete))
-
-            # Convert list of files into a string, to show in the confirmation dialog
-            files_str = "\n".join(selected_files_to_delete)
-
-            # Show confirmation dialog
-            reply = QMessageBox.question(self, 'Confirmation',
-                                         f"Are you sure you want to delete the following files in Perforce?\n\n{files_str}",
-                                         QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-
-            if reply == QMessageBox.Yes:
-                msg = "\n <span style='color:#2C93E2'>Submitting pending files for deletion in Perforce...</span> \n"
-                self._add_log(msg, 2)
-                if selected_files_to_delete:
-                    self._publish_pending_data_using_command_line(selected_tuples_to_publish)
-                    self._delete_pending_data(selected_tuples_to_delete)
-
-                msg = "\n <span style='color:#2C93E2'>Updating the Pending view ...</span> \n"
-                self._add_log(msg, 2)
-                # Update the Pending view
-                # self.update_pending_view()
-        else:
-            msg = "\n <span style='color:#2C93E2'>Please select files marked for deletion in the Pending view...</span> \n"
-            self._add_log(msg, 2)
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.on_submit_deleted_files(change_sg_item, file_info_deleted)
 
     def on_submit_other_files(self, change_sg_item, file_info_other):
-        """
-        When someone clicks on the "Submit Files" button
-        Send pending files to the Shotgrid Publisher.
-        """
-        selected_files_to_submit = []
-        selected_tuples_to_submit = []
-        change = change_sg_item.get("change", None)
-        for file_info in file_info_other:
-            try:
-                target_file = None
-                action = file_info.get("pending_action", None)
-                sg_item = file_info.get("sg_item", None)
-                if sg_item:
-                    target_file = sg_item.get("depotFile", None)
-
-                    if target_file and action not in ["delete"]:
-                        if target_file not in selected_files_to_submit:
-                            submit_tuple = (change, target_file, action, sg_item)
-                            selected_files_to_submit.append(target_file)
-                            selected_tuples_to_submit.append(submit_tuple)
-
-            except Exception as e:
-                logger.debug("{}".format(e))
-
-        if selected_files_to_submit:
-
-            self._submit_other_pending_data(selected_tuples_to_submit)
-            self._publish_pending_data_using_command_line(selected_tuples_to_submit)
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.on_submit_other_files(change_sg_item, file_info_other)
 
     def _publish_file_thread(self, change, target_file, action, sg_item, log_callback, get_entity_callback):
-        """
-        Function to publish a file in a separate thread.
-        """
-        try:
-            description = sg_item.get("description", None)
-            entity, new_sg_item = get_entity_callback(sg_item)
-
-            if entity:
-                if new_sg_item:
-                    sg_item.update(new_sg_item)
-                    sg_item["description"] = description
-                else:
-                    sg_item["entity"] = entity
-
-                if 'path' in sg_item:
-                    rev = sg_item.get("version_number") or sg_item.get("headRev") or 1
-                    file_to_publish = sg_item['path'].get('local_path', None)
-                    log_callback(f"Publishing file: {file_to_publish}#{rev}", 4)
-
-                    publisher = PublishItem(sg_item)
-                    publish_result = publisher.commandline_publishing()
-
-                    if publish_result:
-                        log_callback(f"New data is: {publish_result}", 4)
-            else:
-                log_callback(f"Unable to find the entity associated with the file: {target_file}", 4)
-
-        except Exception as e:
-            log_callback(f"Error publishing file {target_file}: {str(e)}", 4)
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._publish_file_thread(change, target_file, action, sg_item, log_callback, get_entity_callback)
 
     def _publish_pending_data_using_command_line(self, selected_tuples_to_publish):
-        """
-        Publish Depot Data using threading for speedup.
-        """
-        logger.debug(">>>>>>>>>>>  _publish_pending_data_using_command_line")
-        logger.debug(">>>>>>>>>>>  selected_tuples_to_publish:{}".format(selected_tuples_to_publish))
-        if selected_tuples_to_publish:
-            msg = "\n <span style='color:#2C93E2'>Publishing pending files in Shotgrid</span> \n"
-            self._add_log(msg, 2)
-
-            # List to store active threads
-            threads = []
-
-            # Create a thread for each file to publish
-            for change, target_file, action, sg_item in selected_tuples_to_publish:
-                thread = threading.Thread(target=self._publish_file_thread,
-                                          args=(change, target_file, action, sg_item, self._add_log,
-                                                self.get_entity_from_sg_item))
-                threads.append(thread)
-                thread.start()
-
-            # Wait for all threads to finish
-            for thread in threads:
-                thread.join()
-
-            msg = "\n <span style='color:#2C93E2'>Publishing files is complete</span> \n"
-            self._add_log(msg, 2)
-        else:
-            msg = "\n <span style='color:#2C93E2'>No need to publish any file</span> \n"
-            self._add_log(msg, 2)
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._publish_pending_data_using_command_line(selected_tuples_to_publish)
 
     def get_entity_from_sg_item(self, sg_item):
-        # Check if the filepath leads to a valid shotgrid entity
-        filepath = sg_item.get("path", {}).get("local_path", "N/A")  # Get the path safely
-        #logger.debug(f"get_entity_from_sg_item: Processing path: {filepath}")
-        #logger.debug(f"get_entity_from_sg_item: Input sg_item: {sg_item}")  # Log the full input
-
-        entity, published_file = None, None  # Initialize
-
-        # --- Log before calling check_validity_by_published_file ---
-        #logger.debug(f"get_entity_from_sg_item: Attempting check_validity_by_published_file...")
-        try:
-            # Assuming check_validity_by_published_file is imported or available
-            entity, published_file = check_validity_by_published_file(sg_item)
-            logger.debug(
-                f"get_entity_from_sg_item: check_validity_by_published_file result - Entity: {entity}, PublishedFile: {published_file}")
-        except Exception as e:
-            logger.error(f"get_entity_from_sg_item: Error during check_validity_by_published_file: {e}", exc_info=True)
-
-        if not entity:
-            # --- Log before calling check_validity_by_path_parts ---
-            logger.debug(
-                f"get_entity_from_sg_item: PublishedFile check failed or returned no entity. Attempting check_validity_by_path_parts...")
-            try:
-                # Assuming check_validity_by_path_parts is imported or available
-                entity, published_file = check_validity_by_path_parts(swc_fw, sg_item)  # Pass framework if needed
-                logger.debug(
-                    f"get_entity_from_sg_item: check_validity_by_path_parts result - Entity: {entity}, PublishedFile: {published_file}")
-            except Exception as e:
-                logger.error(f"get_entity_from_sg_item: Error during check_validity_by_path_parts: {e}", exc_info=True)
-
-        # --- Log the final result ---
-        if entity:
-            logger.info(f"get_entity_from_sg_item: Successfully found Entity: {entity} for path: {filepath}")
-        else:
-            logger.warning(f"get_entity_from_sg_item: Failed to find Entity for path: {filepath}")
-
-        return entity, published_file
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration.get_entity_from_sg_item(sg_item)
 
     def _delete_file_thread(self, p4, change, file_to_submit, log_callback):
-        """
-        Function to delete a file in a separate thread.
-        """
-        try:
-            submit_result, perforce_msg = submit_and_delete_file(p4, change, file_to_submit)
-            if submit_result and not perforce_msg:
-                log_callback(f"File deleted from Perforce: {file_to_submit}", 2)
-            else:
-                log_callback(f"Error deleting file {file_to_submit}: {perforce_msg}", 4)
-        except Exception as e:
-            log_callback(f"Error deleting file {file_to_submit}: {str(e)}", 4)
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._delete_file_thread(p4, change, file_to_submit, log_callback)
 
     def _delete_pending_data(self, selected_tuples_to_delete):
-        """
-        Delete Depot Data in the Pending view that needs to be deleted.
-        """
-        if selected_tuples_to_delete:
-            msg = "\n <span style='color:#2C93E2'>Submitting files for deletion...</span> \n"
-            self._add_log(msg, 2)
-
-            # List to store active threads
-            threads = []
-
-            # Create a thread for each file to delete
-            for change, file_to_submit in selected_tuples_to_delete:
-                # Create a thread for each deletion
-                thread = threading.Thread(target=self._delete_file_thread,
-                                          args=(self._p4, change, file_to_submit, self._add_log))
-                threads.append(thread)
-                thread.start()
-
-            # Wait for all threads to finish
-            for thread in threads:
-                thread.join()
-
-            msg = "\n <span style='color:#2C93E2'>File deletion completed.</span> \n"
-            self._add_log(msg, 2)
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._delete_pending_data(selected_tuples_to_delete)
 
     def _submit_other_pending_data(self, selected_data_to_submit):
-        """
-        Publish Depot Data in the Pending view that are not marked for deletion.
-        """
-        if selected_data_to_submit:
-            msg = "\n <span style='color:#2C93E2'>Submitting other pending files...</span> \n"
-            self._add_log(msg, 2)
-
-            for change, file_to_submit, action, sg_item in selected_data_to_submit:
-                # logger.debug(">>>>>>>>>>  file_to_submit: {}".format(file_to_submit))
-                # logger.debug(">>>>>>>>>>  change: {}".format(change))
-                if change and file_to_submit and action:
-                    if action not in ["delete"]:
-                        msg = "{}".format(file_to_submit)
-                        self._add_log(msg, 4)
-                        submit_res = submit_single_file(self._p4, change, file_to_submit, action)
-                        logger.debug("Result of submitting files: {}".format(submit_res))
-                        if submit_res:
-                            msg = "\n <span style='color:#2C93E2'>File submitted to Perforce:</span> \n".format(file_to_submit)
-                            self._add_log(msg, 2)
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._submit_other_pending_data(selected_data_to_submit)
 
     def _publish_other_pending_data(self, other_data_to_publish):
-        """
-        Publish Depot Data in the Pending view that does not need to be deleted.
-        """
-
-        if other_data_to_publish:
-            msg = "\n <span style='color:#2C93E2'>Submitting pending files that are not marked for delete...</span> \n"
-            self._add_log(msg, 2)
-            # Create publish file
-            out_file = open(self._publish_files_path, 'w')
-            out_file.write('Pending Files\n')
-            # Create a new Perforce changelist
-
-            for key in other_data_to_publish:
-                for sg_item in other_data_to_publish[key]:
-                    # logger.debug(">>>>>>>>>>  sg_item: {}".format(sg_item))
-                    if sg_item and 'path' in sg_item:
-                        file_to_submit = sg_item['path'].get('local_path', None)
-                        if file_to_submit:
-                            msg = "{}".format(file_to_submit)
-                            self._add_log(msg, 4)
-                            out_file.write('%s\n' % file_to_submit)
-                            #add_res = add_to_change(self._p4, change, file_to_submit)
-                            #action_result = self._p4.run("edit", "-c", change, "-v", file_to_submit)
-
-            out_file.close()
-
-            # Run the publisher UI
-            msg = "\n <span style='color:#2C93E2'>Initializing Publisher UI, please stand by...</span> \n"
-            self._add_log(msg, 2)
-
-            engine = sgtk.platform.current_engine()
-            engine.commands["Publish..."]["callback"]()
-
-            # Update the Pending view
-
-            msg = "\n <span style='color:#2C93E2'>Updating the Pending View ...</span> \n"
-            self._add_log(msg, 2)
-            self.update_pending_view()
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._publish_other_pending_data(other_data_to_publish)
 
     def _publish_delete_pending_data(self, deleted_data_to_publish):
-        """
-        Publish Depot Data in the Pending view that needs to be deleted.
-        """
-        files_to_delete = []
-        if deleted_data_to_publish:
-            msg = "\n <span style='color:#2C93E2'>Submitting files for deletion...</span> \n"
-            self._add_log(msg, 2)
-            for key in deleted_data_to_publish:
-
-                for sg_item in deleted_data_to_publish[key]:
-                    # logger.debug(">>>>>>>>>>  sg_item: {}".format(sg_item))
-
-                    file_to_submit = sg_item.get('path', {}).get('local_path', None) if 'path' in sg_item else None
-
-                    if file_to_submit:
-                        msg = "{}".format(file_to_submit)
-                        self._add_log(msg, 4)
-                        submit_del_res = submit_change(self._p4, file_to_submit)
-                        logger.debug("Result of deleting files: {}".format(submit_del_res))
-                        if submit_del_res:
-                            # Check if submit_del_res is a list
-                            if isinstance(submit_del_res, list) and len(submit_del_res) > 0:
-                                submit_del_res = submit_del_res[0]
-                                if 'submittedChange' in submit_del_res:
-                                    sg_item['submittedChange'] = submit_del_res['submittedChange']
-                                    self._publish_deleted_data_using_command_line([sg_item])
-
-            self._publish_deleted_data_using_command_line(deleted_data_to_publish)
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._publish_delete_pending_data(deleted_data_to_publish)
 
     def _publish_deleted_data_using_command_line(self, deleted_data_to_publish):
-        """
-        Publish Pending view Depot Data that needs to be deleted using the command line, with threading for speedup.
-        """
-        if deleted_data_to_publish:
-            # List to store active threads
-            threads = []
-
-            for sg_item in deleted_data_to_publish:
-                file_path = sg_item['path'].get('local_path', None) if 'path' in sg_item else None
-                target_context = self._find_task_context(file_path)
-
-                if target_context.entity and file_path:
-                    sg_item["entity"] = target_context.entity
-
-                    # Create a thread for each delete task
-                    thread = threading.Thread(target=self._delete_one_file_thread,
-                                              args=(sg_item, file_path))
-                    threads.append(thread)
-                    thread.start()
-
-            # Wait for all threads to finish
-            for thread in threads:
-                thread.join()
-
-            msg = "\n <span style='color:#2C93E2'>Publishing files marked for delete is complete</span> \n"
-            self._add_log(msg, 2)
-        else:
-            msg = "\n <span style='color:#2C93E2'>No need to publish any file that is marked for deletion</span> \n"
-            self._add_log(msg, 2)
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._publish_deleted_data_using_command_line(deleted_data_to_publish)
 
     def _delete_one_file_thread(self, sg_item, file_path):
-        """
-        Delete a single file in a thread.
-        """
-        # Publish the file to Shotgrid with a new version number and "delete" action
-        publisher = PublishItem(sg_item)
-        publish_result = publisher.commandline_publishing()
-        if publish_result:
-            logger.debug("New data is: {}".format(publish_result))
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._delete_one_file_thread(sg_item, file_path)
 
     def _get_published_files(self, sg_item):
-
-        # Define the file path of the published file
-        file_path = sg_item['path'].get('local_path', None) if 'path' in sg_item else None
-
-        # Construct the Shotgrid API query filters
-        filters = [
-            ["path", "contains", file_path],
-            ["entity.Asset.sg_asset_type", "is_not", "Shot"],  # Optional filter to exclude shots
-        ]
-
-        # Specify the fields to retrieve for the versions
-        fields = ["id", "code", "created_at", "user", "action", "step"]
-
-        # Make the Shotgrid API call to search for versions
-        versions = self._app.shotgun("Version", filters, fields, order=[{"field_name": "created_at", "direction": "asc"}])
-
-        logger.debug("versions {}".format(versions))
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._get_published_files(sg_item)
 
     def _on_fix_list(self):
-        # self._submitted_data_to_publish = []
-        # logger.debug(">>>>>>>>>>   self._submitted_data_to_publish {}".format( self._submitted_data_to_publish))
-        self._publish_submitted_data_using_command_line()
-
-        self._setup_file_details_panel([])
-        self._on_treeview_item_selected()
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.on_fix_list()
 
     def _on_fix_selected(self):
-        """
-        When someone clicks on the "Fix Selected" button
-        Send unpublished depot files in the submitted view to the Shotgrid Publisher.
-        """
-        # Publish depot files
-        #self._get_submitted_publish_data()
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.on_fix_selected()
 
-        self._submitted_data_to_publish = self.submitted_tree_view.get_selected_publish_items()
-        #logger.debug(">>>>>>>>>>   self._submitted_data_to_publish {}".format( self._submitted_data_to_publish))
-        #self._publish_submitted_data_using_publisher_ui()
-        self._publish_submitted_data_using_command_line()
-
-        self._setup_file_details_panel([])
-        self._on_treeview_item_selected()
-        
     def _on_fix_all(self):
-        """
-        When someone clicks on the "Fix All" button
-        Send unpublished depot files in the submitted view to the Shotgrid Publisher.
-        """
-        self._submitted_data_to_publish = []
-        for key in self._fstat_dict:
-            # Find if it is published
-            sg_item = self._fstat_dict[key]
-            is_published = sg_item.get("Published", False)
-            if not is_published:
-                self._submitted_data_to_publish.append(sg_item)
-        #logger.debug(">>>>>>>>>>   self._submitted_data_to_publish {}".format( self._submitted_data_to_publish))
-        #self._publish_submitted_data_using_publisher_ui()
-        self._publish_submitted_data_using_command_line()
-
-        self._setup_file_details_panel([])
-        self._on_treeview_item_selected()
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.on_fix_all()
 
     def _create_publisher_dir(self):
-        home_dir = expanduser("~")
-        self._home_dir = "{}/.publisher".format(home_dir)
-        if not os.path.exists(self._home_dir):
-            os.makedirs(self._home_dir)
-        self._publish_files_path = "{}/publish_files.txt".format(self._home_dir)
-        #logger.debug(">>>>>>>>>>   self._publish_files_path {}".format(self._publish_files_path))
-        self._publish_files_description = "{}/publish_files_description.txt".format(self._home_dir)
-        self._publisher_is_closed_path = "{}/publisher_is_closed.txt".format(self._home_dir)
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._create_publisher_dir()
 
     def _on_publish_files(self):
-        files_count = len(self._action_data_to_publish)
-        if files_count > 0:
-            msg = "\n <span style='color:#2C93E2'>Publishing files ...</span> \n"
-            self._add_log(msg, 2)
-
-            for i, sg_item in enumerate(self._action_data_to_publish):
-                if "local_path" in sg_item["path"]:
-                    file_path = sg_item["path"].get("local_path", None)
-                    if file_path:
-                        rev = sg_item.get("version_number") or sg_item.get("headRev") or 1
-
-                        msg = "({}/{})  Publishing file: {}#{}".format(i + 1, files_count, file_path, rev)
-                        self._add_log(msg, 3)
-                        publisher = PublishItem(sg_item)
-                        publish_result = publisher.commandline_publishing()
-        else:
-            msg = "\n <span style='color:#2C93E2'>There are no files to publish</span> \n"
-            self._add_log(msg, 2)
-
-        # publisher = PublishManager()
-        #publisher = P4SGPUBLISHER()
-        #publisher = MultiPublish2()
-
-        #engine = sgtk.platform.current_engine()
-        #engine.commands['Publish...']["callback"]()
-
-        # Reset _action_data_to_publish list
-        self._action_data_to_publish = []
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.on_publish_files()
 
     def _on_sync_files(self):
         """
@@ -6042,20 +2583,9 @@ class AppDialog(QWidget):
 
     def _sync_current_file(self):
         files_to_sync, total_file_count = self._get_files_to_sync()
-        files_to_sync_count = len(files_to_sync)
-        if files_to_sync_count == 0:
-            msg = "\n <span style='color:#2C93E2'>No Need to sync</span> \n"
-            self._add_log(msg, 2)
-
-        elif files_to_sync_count > 0:
-            msg = "\n <span style='color:#2C93E2'>Syncing {} files ... </span> \n".format(files_to_sync_count)
-            self._add_log(msg, 2)
-            self._do_sync_files_threading_thread_2(files_to_sync)
-
-            msg = "\n <span style='color:#2C93E2'>Syncing files is complete</span> \n"
-            self._add_log(msg, 2)
-            msg = "\n <span style='color:#2C93E2'>Reloading data ...</span> \n"
-            self._add_log(msg, 2)
+        self._sync_manager.sync_files_list(files_to_sync)
+        if files_to_sync:
+            self._add_log("\n <span style='color:#2C93E2'>Reloading data ...</span> \n", 2)
             self._status_model.hard_refresh()
             self._publish_file_history_model.hard_refresh()
             self._publish_model.hard_refresh()
@@ -6064,39 +2594,17 @@ class AppDialog(QWidget):
             if self.main_view_mode == self.MAIN_VIEW_COLUMN:
                 self._populate_column_view_widget()
 
-            msg = "\n <span style='color:#2C93E2'>Reloading data is complete</span> \n"
-            self._add_log(msg, 2)
-
-    def _after_syncing_operations(self ):
-        msg = "\n <span style='color:#2C93E2'>Syncing files is complete</span> \n"
-        self._add_log(msg, 2)
-        msg = "\n <span style='color:#2C93E2'>Reloading data ...</span> \n"
-        self._add_log(msg, 2)
-        self._status_model.hard_refresh()
-        self._publish_file_history_model.hard_refresh()
-        self._publish_model.hard_refresh()
-        self._setup_file_details_panel([])
-        # self._get_perforce_summary()
-
-        if self.main_view_mode == self.MAIN_VIEW_COLUMN:
-            self._update_perforce_data()
-            self._populate_column_view_widget()
+            self._add_log("\n <span style='color:#2C93E2'>Reloading data is complete</span> \n", 2)
 
     def _sync_entity_parents(self):
         logger.debug("Getting entity parents")
         self._get_entity_parents(self._entity_data)
         logger.debug("Syncing entity parents published files")
-        self._sync_entity_parents_published_files()
+        self._sync_manager.sync_entity_parents_published_files(self.entity_parents, self._app)
 
     def _get_perforce_summary(self):
-        """
-        When someone clicks on the "Sync" button
-        """
-        files_to_sync, total_file_count = self._get_files_to_sync()
-        files_to_sync_count = len(files_to_sync)
-        if files_to_sync_count == 0:
-            msg = "\n <span style='color:#2C93E2'>No Need to sync</span> \n"
-            self._add_log(msg, 2)
+        self._sync_manager.get_perforce_summary(
+            self.ui.publish_view.model(), shotgun_model, SgLatestPublishModel)
 
 
     ########################################################################################
@@ -6104,484 +2612,27 @@ class AppDialog(QWidget):
 
     # Perforce connection, Sync, and related GUI items
     def _publish_submitted_data_using_publisher_ui(self):
-        """
-        Publish Depot Data
-        """
-        selected_item = self._get_selected_entity()
-        sg_entity = shotgun_model.get_sg_data(selected_item)
-
-        # logger.debug(">>>>>>>>>>  sg_entity {}".format(sg_entity))
-
-        if self._submitted_data_to_publish:
-            msg = "\n <span style='color:#2C93E2'>Sending the following unpublished files to the Shotgrid Publisher...</span> \n"
-            self._add_log(msg, 2)
-            # Create publish file
-            out_file = open(self._publish_files_path, 'w')
-            out_file.write('Depot Files\n')
-            # Create a new Perforce changelist
-            desc = "Fixing files "
-            change = create_change(self._p4, desc)
-
-            for sg_item in self._submitted_data_to_publish:
-                sg_item["entity"] = sg_entity
-                if 'path' in sg_item:
-                    file_to_publish = sg_item['path'].get('local_path', None)
-                    if file_to_publish:
-                        msg = "{}".format(file_to_publish)
-                        self._add_log(msg, 4)
-
-                        out_file.write('%s\n' % file_to_publish)
-                        action = self._get_action(sg_item)
-                        if action:
-                            action = self.action_dict.get(action, None)
-                            add_res = add_to_change(self._p4, change, file_to_publish)
-                            action_result = self._p4.run(action, "-c", change, "-v", file_to_publish)
-            out_file.close()
-
-            engine = sgtk.platform.current_engine()
-            engine.commands["Publish..."]["callback"]()
-            msg = "\n <span style='color:#2C93E2'>Reloading data ...</span> \n"
-            self._add_log(msg, 2)
-            self._reload_treeview()
-
-            msg = "\n <span style='color:#2C93E2'>Updating the Pending View ...</span> \n"
-            self._add_log(msg, 2)
-            self.update_pending_view()
-
-        else:
-            msg = "\n <span style='color:#2C93E2'>Check files in the Pending view to publish using the Shotgrid Publisher</span> \n"
-            self._add_log(msg, 2)
-
-        self._submitted_data_to_publish = []
-
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._publish_submitted_data_using_publisher_ui()
 
     def _publish_submitted_data_using_command_line(self):
-        """
-        Publish Depot Data using threading for speedup.
-        """
-        selected_item = self._get_selected_entity()
-        sg_entity = shotgun_model.get_sg_data(selected_item)
-
-        if self._submitted_data_to_publish:
-            msg = "\n <span style='color:#2C93E2'>Publishing all unpublished files in the depot associated with this entity to Shotgrid ...</span> \n"
-            self._add_log(msg, 2)
-            files_count = len(self._submitted_data_to_publish)
-
-            # List to store active threads
-            threads = []
-
-            # Create and start threads for publishing each file
-            for i, sg_item in enumerate(self._submitted_data_to_publish):
-                sg_item["entity"] = sg_entity
-                if 'path' in sg_item:
-                    rev = sg_item.get("version_number") or sg_item.get("headRev") or 1
-                    file_to_publish = sg_item['path'].get('local_path', None)
-                    msg = "({}/{})  Publishing file: {}#{}".format(i + 1, files_count, file_to_publish, rev)
-                    self._add_log(msg, 4)
-
-                    # Create a thread for each publish task
-                    thread = threading.Thread(target=self._publish_one_file_thread,
-                                              args=(sg_item, file_to_publish, rev))
-                    threads.append(thread)
-                    thread.start()
-
-            # Wait for all threads to finish
-            for thread in threads:
-                thread.join()
-
-            msg = "\n <span style='color:#2C93E2'>Publishing files is complete</span> \n"
-            self._add_log(msg, 2)
-            msg = "\n <span style='color:#2C93E2'>Reloading data</span> \n"
-            self._add_log(msg, 2)
-            # self._reload_treeview()
-
-        else:
-            msg = "\n <span style='color:#2C93E2'>No need to publish any file</span> \n"
-            self._add_log(msg, 2)
-
-        self._submitted_data_to_publish = []
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._publish_submitted_data_using_command_line()
 
     def _publish_one_file_thread(self, sg_item, file_to_publish, rev):
-        """
-        Publish a single file in a thread.
-        """
-        publisher = PublishItem(sg_item)
-        publish_result = publisher.commandline_publishing()
-        if publish_result:
-            logger.debug("New data is: {}".format(publish_result))
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._publish_one_file_thread(sg_item, file_to_publish, rev)
 
     def _create_key(self, file_path):
-        return file_path.replace("\\", "").replace("/", "").lower() if file_path else None
+        return PerforceSyncManager.create_key(file_path)
 
     def _get_files_to_sync(self):
-        """
-        Get Perforce Data
-        :return:
-        """
-        total_file_count = 0
-        files_to_sync = []
-
-        model = self.ui.publish_view.model()
-        for row in range(model.rowCount()):
-            model_index = model.index(row, 0)
-            proxy_model = model_index.model()
-            source_index = proxy_model.mapToSource(model_index)
-            # now we have arrived at our model derived from StandardItemModel
-            # so let's retrieve the standarditem object associated with the index
-            item = source_index.model().itemFromIndex(source_index)
-
-            is_folder = item.data(SgLatestPublishModel.IS_FOLDER_ROLE)
-            if not is_folder:
-                # Run default action.
-                total_file_count += 1
-                sg_item = shotgun_model.get_sg_data(model_index)
-                # logger.info("--------->>>>>>  sg_item is: {}".format(sg_item))
-                sg_item_path = sg_item.get("path", None)
-                if sg_item_path:
-                    local_path = sg_item_path.get("local_path", None)
-
-                    if local_path:
-                        """
-                        action = sg_item.get("action", None)
-                        head_action = sg_item.get("headAction", None)
-                        
-                        if action and action != head_action:
-                            files_to_sync.append(local_path)
-                            msg = "Publishing file: {}...".format(local_path)
-                            self._add_log(msg, 4)
-                            publisher = PublishItem(sg_item)
-                            publish_result = publisher.commandline_publishing()
-                        else:
-                        """
-                        have_rev = sg_item.get('haveRev', "0")
-                        head_rev = sg_item.get('headRev', "0")
-                        if self._to_sync(have_rev, head_rev):
-                            files_to_sync.append(local_path)
-
-        return files_to_sync, total_file_count
-
-    def _sync_file(self, file_name, i, total):
-        # Sync file
-        logger.debug("Syncing file: {}".format(file_name))
-        logger.debug("i: {}".format(i))
-        logger.debug("total: {}".format(total))
-
-        p4_result = self._p4.run("sync", "-f", file_name + "#head")
-        logger.debug("p4_result is: {}".format(p4_result))
-
-        if p4_result:
-            # Update log
-            msg = "({}/{})  Syncing of file {} is complete".format(i + 1, total, file_name)
-            self._add_log(msg, 3)
-            # Update progress bar
-            progress_sum = ((i + 1) / total) * 100
-            self.progress_bar(progress_sum)
-            #time.sleep(1)
-        QCoreApplication.processEvents()
-
-    def _do_sync_files_threads(self, files_to_sync):
-
-        threads = []
-        total = len(files_to_sync)
-        if total > 0:
-            # Creating and starting threads for each file
-            for i, file_name in enumerate(files_to_sync):
-               
-                    msg = "({}/{})  Syncing file: {}...".format(i + 1, total, file_name)
-                    self._add_log(msg, 3)
-                    thread = threading.Thread(target=self._sync_file, args=(file_name,i, total,))
-                    threads.append(thread)
-                    #thread.start()
-    
-            # Start all threads
-            max_threads = 5
-            count = 1
-            while len(threads) > 0:
-                if threading.activeCount() <= max_threads:
-                    #logger.debug("--------->>>>>>  count: {}".format(count))
-                    thread = threads.pop()
-                    thread.start()
-                    count += 1
-    
-            # Waiting for all threads to finish
-            for thread in threads:
-                thread.join()
-            #   #thread.wait()
-    """
-    def _sync_file_threads(self, file_name):
-        # Sync file
-        logger.debug("--------->>>>>>  Syncing file: {}".format(file_name))
-
-        p4_result = self._p4.run("sync", "-f", file_name + "#head")
-        logger.debug("--------->>>>>>  p4_result is: {}".format(p4_result))
-
-        if p4_result:
-            # Update log
-            msg = "({}/{})  Syncing of file {} is complete".format(i + 1, total, file_name)
-            self._add_log(msg, 3)
-            # Update progress bar
-            progress_sum = ((i + 1) / total) * 100
-            self._add_progress_bar(progress_sum)
-            #time.sleep(1)
-        QCoreApplication.processEvents()
-    """
-
-    def _do_sync_files_ThreadPoolExecutor(self, files_to_sync):
-
-        threads = []
-        total = len(files_to_sync)
-        # Number of parallel threads to use
-        num_threads = 3
-        if total > 0:
-
-            # Create a ThreadPoolExecutor with the desired number of threads
-            with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
-                # Submit each file sync task to the executor
-                results = [executor.submit(self._sync_file, file_path) for file_path in files_to_sync]
-
-                # Wait for all tasks to complete
-                concurrent.futures.wait(results)
-
-    def _do_sync_files_FileSyncThread(self, files_to_sync):
-
-        threads = []
-        self.file_queue = queue.Queue()
-        total = len(files_to_sync)
-        if total > 0:
-            # Creating and starting threads for each file
-            for i, file_name in enumerate(files_to_sync):
-                msg = "({}/{})  Syncing file: {}...".format(i + 1, total, file_name)
-                self._add_log(msg, 3)
-                self.file_queue.put(file_name)
-
-            num_threads = min(len(files_to_sync), 4)  # Number of threads to use
-            for _ in range(num_threads):
-                # Creating and starting threads for the file queue
-                thread = FileSyncThread(self._p4, self.file_queue)
-                thread.start()
-                threads.append(thread)
-
-            self.file_queue.join()
-            # Waiting for all threads to finish
-            #for thread in threads:
-            #    thread.join()
-
-
-    def _do_sync_files_ThreadPool(self, files_to_sync):
-        # Sync files
-        total = len(files_to_sync)
-        if total > 0:
-            self.thread_pool = QThreadPool()
-            #self.thread_pool = QThreadPool.globalInstance()
-            self.thread_pool.setMaxThreadCount(6)  # Set the maximum number of concurrent threads
-            for i, file_name in enumerate(files_to_sync):
-                msg = "({}/{})  Syncing file: {}...".format(i + 1, total, file_name)
-                self._add_log(msg, 3)
-                #runnable = SyncRunnable(p4=self._p4, file_name=file_name)
-                runnable = self._sync_runnable_file(file_name)
-                self.thread_pool.start(runnable)
-                progress_sum = ((i + 1) / total) * 100
-                self._update_progress(progress_sum)
-                QCoreApplication.processEvents()
-            self.thread_pool.waitForDone()
-
-
-    def _do_sync_files_concurrent_futures(self, files_to_sync):
-        # Sync files
-        total = len(files_to_sync)
-        if total > 0:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
-                futures = []
-                for i, file_name in enumerate(files_to_sync):
-                    msg = "({}/{})  Syncing file: {}...".format(i + 1, total, file_name)
-                    self._add_log(msg, 3)
-                    # runnable = SyncRunnable(p4=self._p4, file_name=file_name)
-                    runnable = self._sync_runnable_file(file_name)
-                    future = executor.submit(runnable)
-                    futures.append(future)
-                    progress_sum = ((i + 1) / total) * 100
-                    self._update_progress(progress_sum)
-
-                # Wait for all tasks to complete
-                concurrent.futures.wait(futures)
-
-    def _sync_runnable_file(self, file_name):
-        # Sync file
-        #logger.debug("--------->>>>>>  Syncing file: {}".format(file_name))
-
-        p4_result = self._p4.run("sync", "-f", file_name + "#head")
-        #logger.debug("--------->>>>>>  p4_result is: {}".format(p4_result))
-
-    def _do_sync_files_SyncThread(self, files_to_sync):
-
-        # Creating and starting threads for each file
-        threads = []
-
-        progress_sum = 0
-        total = len(files_to_sync)
-        if total > 0:
-            for i, file_name in enumerate(files_to_sync):
-                msg = "({}/{})  Syncing file: {}".format(i + 1, total, file_name)
-                self._add_log(msg, 3)
-                progress_sum = ((i + 1) / total) * 100
-                thread = SyncThread(p4=self._p4, file_name=file_name)
-                threads.append(thread)
-                #thread.start()
-                #thread.run()
-                self._update_progress(progress_sum)
-                QCoreApplication.processEvents()
-
-            # Start all threads
-            for thread in threads:
-                thread.start()
-
-            # Waiting for all threads to finish
-            for thread in threads:
-                thread.join()
-
-    def _do_sync_files_sequential(self, files_to_sync):
-        
-        #Get latest revision
-        
-        progress_sum = 0
-        total = len(files_to_sync)
-        if total > 0:
-            for i, file_path in enumerate(files_to_sync):
-                progress_sum = ((i + 1) / total) * 100
-                p4_result = self._p4.run("sync", "-f", file_path + "#head")
-                logger.debug("Syncing file: {}".format(file_path))
-                msg = "({}/{})  Syncing file: {}".format(i+1, total, file_path)
-                self._add_log(msg, 3)
-                self._update_progress(progress_sum)
-
-    def _do_sync_files_threading_thread_1(self, files_to_sync):
-        self.sync_command = []
-        self.sync_command.append("sync")
-        self.sync_command.append("-f")
-        #parallel_cmd = "--parallel threads=12,batch=8,batchsize=512,min=1,minsize=1"
-        #self.sync_command.append(parallel_cmd)
-
-        for i, file_path in enumerate(files_to_sync):
-            depot_path = self._convert_local_to_depot(file_path)
-            depot_path = "{}#head".format(depot_path)
-            self.sync_command.append(depot_path)
-
-        logger.debug("sync_command: {}".format(self.sync_command))
-
-        sync_threads = threading.Thread(target=self.run_sync, args=())
-        sync_threads.start()
-        sync_threads.join()
+        return self._sync_manager.get_files_to_sync(
+            self.ui.publish_view.model(), shotgun_model, SgLatestPublishModel)
 
     def _do_sync_files_threading_thread_2(self, files_to_sync, entity=None):
-        self.sync_command = []
-        self.sync_command.append("sync")
-        self.sync_command.append("-f")
-        self.sync_command.append("--parallel")
-        self.sync_command.append("threads=16,batch=4,batchsize=4096,min=1,minsize=1")
-
-        for i, file_path in enumerate(files_to_sync):
-            depot_path = self._convert_local_to_depot(file_path)
-            depot_path = "{}#head".format(depot_path)
-            self.sync_command.append(depot_path)
-
-        #logger.debug("sync_command: {}".format(self.sync_command))
-
-        sync_thread = threading.Thread(target=self.run_sync, args=())
-        sync_thread.start()
-
-        total = len(files_to_sync)
-        for i, file_path in enumerate(files_to_sync):
-
-            msg = "({}/{})  Syncing file: {}".format(i + 1, total, file_path)
-            self._add_log(msg, 3)
-            progress_sum = ((i + 1) / total) * 100
-            # Simulate progress
-            self._update_progress(progress_sum)
-            QCoreApplication.processEvents()
-            time.sleep(0.15)
-            #time.sleep(0.1)
-
-        msg = "\n <span style='color:#2C93E2'>Finalizing file syncing, please wait...</span> \n"
-        self._add_log(msg, 2)
-
-        # Todo, find out why this is faster than sync_thread.join()
-        # wait for all threads to complete
-        while sync_thread.is_alive():
-            #threading.enumerate()
-            #logger.debug(">>>>>>>>> len(threading.enumerate()): {}".format(len(threading.enumerate())))
-            QCoreApplication.processEvents()
-
-        # wait for all threads to complete
-        #sync_thread.join()
-
-    def run_sync(self):
-        # Sync files
-        p4_response = self._p4.run(self.sync_command)
-        logger.debug("Result of syncing files ..." )
-        for entry in p4_response:
-            logger.debug("{}".format(entry))
-
-        # Check for errors in the p4_response
-        if any(entry.get('error') for entry in p4_response):
-            error_messages = [entry['error'] for entry in p4_response if entry.get('error')]
-            #raise Exception("File sync failed with errors: {}".format(", ".join(error_messages)))
-            logger.error("File sync failed with errors: {}".format(", ".join(error_messages)))
-
-        # The sync was successful
-        logger.debug("File sync completed.")
-
-    def update_progress_thread(self, thread, total_tasks, completed_tasks, remaining_tasks):
-        while thread.is_alive():
-            progress = int((completed_tasks / total_tasks) * 100)  # Calculate the progress based on completed tasks
-            self.progress_bar.setValue(progress)
-            QCoreApplication.processEvents()
-
-    def run_sync_semaphore(self, files_to_sync, semaphore, completed_tasks):
-        for file in files_to_sync:
-            with semaphore:  # Acquire semaphore to indicate a task in progress
-                # Perform the sync operation for file using self.sync_command
-                # Update the progress of completed tasks
-                completed_tasks += 1
-
-        self.completed_tasks = completed_tasks
-        self.remaining_tasks = 0
-
-    def _do_sync_files_threading_multi_thread(self, files_to_sync):
-        self.sync_command = []
-        self.sync_command.append("sync")
-        self.sync_command.append("-f")
-
-        for i, file_path in enumerate(files_to_sync):
-            depot_path = self._convert_local_to_depot(file_path)
-            depot_path = "{}#head".format(depot_path)
-            self.sync_command.append(depot_path)
-
-        logger.debug("sync_command: {}".format(self.sync_command))
-
-        sync_threads = []
-        for _ in range(len(files_to_sync)):
-            thread = threading.Thread(target=self.run_sync, args=())
-            sync_threads.append(thread)
-            thread.start()
-
-        for thread in sync_threads:
-            thread.join()
-
-    def _do_sync_files_subprocess(self, files_to_sync):
-
-        processes = []
-        total = len(files_to_sync)
-        for i, file_path in enumerate(files_to_sync):
-            depot_path = self._convert_local_to_depot(file_path)
-            depot_path = "{}#head".format(depot_path)
-            msg = "({}/{})  Syncing file: {}".format(i + 1, total, file_path)
-            self._add_log(msg, 3)
-            p = subprocess.Popen(['p4', 'sync', '-f', depot_path])
-            processes.append(p)
-
-        for p in processes:
-            p.wait()
+        """Delegate to PerforceSyncManager."""
+        self._sync_manager._do_sync_files_threading_thread_2(files_to_sync, entity)
 
     def _update_progress(self, value):
         """
@@ -6619,30 +2670,12 @@ class AppDialog(QWidget):
         self._log_updater.updateLog.emit(msg, flag)
         QtCore.QCoreApplication.processEvents()
 
-    def _to_sync (self, have_rev, head_rev):
-        """
-        Determine if we should sync the file
-        """
-        have_rev_int = int(have_rev)
-        head_rev_int = int(head_rev)
-        if head_rev_int > 0 and have_rev_int < head_rev_int:
-            return True
-        return False
+    def _to_sync(self, have_rev, head_rev):
+        return PerforceSyncManager.to_sync(have_rev, head_rev)
 
     def _connect(self):
-        """
-        Connect to Perforce.  If a connection can't be established with
-        the current settings then the connection UI will be shown.
-        """
-        try:
-            if not self._p4:
-                logger.debug("Connecting to perforce ...")
-                self._fw = sgtk.platform.get_framework("tk-framework-perforce")
-                self._p4 = self._fw.connection.connect()
-        except:
-            #Todo add error message
-            logger.debug("Failed to connect!")
-            raise
+        self._sync_manager.reconnect()
+        self._p4 = self._sync_manager.p4
     ########################################################################################
     # cog icon actions
 
@@ -7391,60 +3424,7 @@ class AppDialog(QWidget):
 
 
     def _get_sync_count_for_entity(self, key):
-        """
-        Given a ShotGrid entity path, return how many files need to be synced for it.
-        Checks both Perforce status and actual file existence on disk.
-        """
-        logger.debug(f"[SYNC CHECK] Checking entity: PATH={key}")
-
-        try:
-            sync_count = 0
-            key = key.rstrip('/')
-
-            # Get file status from Perforce
-            fstat_list = self._p4.run_fstat(key + '/...')
-
-            if not isinstance(fstat_list, list):
-                logger.debug(f"[SYNC CHECK] run_fstat returned {type(fstat_list)} for {key}, skipping")
-                return 0
-
-            for i, fstat in enumerate(fstat_list):
-                if not isinstance(fstat, dict):
-                    continue
-                if fstat:
-                    # logger.debug(f"[SYNC CHECK] fstat {i}: {fstat}")
-
-                    # Get the local file path
-                    client_file = fstat.get('clientFile')
-                    have_rev = fstat.get('haveRev', "0")
-                    head_rev = fstat.get('headRev', "0")
-
-                    # Check if file needs syncing
-                    needs_sync = False
-
-                    if have_rev == "0" or have_rev == "none":
-                        # File has never been synced
-                        needs_sync = True
-                    elif client_file:
-                        # Check if file actually exists on disk
-                        if not os.path.exists(client_file):
-                            # Perforce thinks we have it, but file doesn't exist
-                            needs_sync = True
-                            # logger.debug(f"[SYNC CHECK] File missing on disk: {client_file}")
-                        elif self._to_sync(have_rev, head_rev):
-                            # File exists but is out of date
-                            needs_sync = True
-                            #logger.debug(f"[SYNC CHECK] File out of date: {client_file} (have:{have_rev}, head:{head_rev})")
-
-                    if needs_sync:
-                        sync_count += 1
-
-            logger.debug(f"[SYNC CHECK] Total files to sync: {sync_count}")
-            return sync_count
-
-        except Exception as e:
-            logger.warning(f"[SYNC CHECK] Exception during sync check for entity path {key}: {e}")
-            return 0
+        return self._sync_manager.get_sync_count_for_entity(key)
 
     def trigger_search(self, view, proxy_model, search):
         QApplication.processEvents()  # Process all pending GUI events
@@ -7932,64 +3912,10 @@ class AppDialog(QWidget):
         logger.debug("Finished _on_treeview_item_selected.")
 
     def _get_sync_count_for_entity_cached(self, entity_path):
-        """
-        Get sync count with caching to improve performance.
-        Thread-safe implementation with cache expiration.
-        """
-        current_time = time.time()
-        cache_key = entity_path.lower().rstrip('/')  # Normalize the path for consistent caching
-
-        with self._sync_count_cache_lock:
-            # Check if we have a cached value that's not expired
-            if cache_key in self._sync_count_cache:
-                cached_value, timestamp = self._sync_count_cache[cache_key]
-                if current_time - timestamp < self._sync_count_cache_timeout:
-                    logger.debug(f"Using cached sync count for {entity_path}: {cached_value}")
-                    return cached_value
-                else:
-                    # Remove expired entry
-                    del self._sync_count_cache[cache_key]
-
-        # Calculate fresh sync count (outside the lock to avoid blocking)
-        logger.debug(f"Calculating fresh sync count for {entity_path}")
-        sync_count = self._get_sync_count_for_entity(entity_path)
-
-        # Cache the result
-        with self._sync_count_cache_lock:
-            self._sync_count_cache[cache_key] = (sync_count, current_time)
-            # Limit cache size to prevent memory issues
-            self._cleanup_sync_cache()
-
-        return sync_count
-
-    def _cleanup_sync_cache(self):
-        """
-        Clean up old entries from sync cache to prevent memory bloat.
-        Should be called while holding the cache lock.
-        """
-        max_cache_size = 100  # Maximum number of entries to keep
-
-        if len(self._sync_count_cache) > max_cache_size:
-            # Sort by timestamp and keep only the most recent entries
-            sorted_items = sorted(self._sync_count_cache.items(),
-                                  key=lambda x: x[1][1], reverse=True)
-            self._sync_count_cache = dict(sorted_items[:max_cache_size])
+        return self._sync_manager.get_sync_count_for_entity_cached(entity_path)
 
     def _invalidate_sync_cache(self, entity_path=None):
-        """
-        Invalidate sync cache entries.
-        If entity_path is provided, only that entry is invalidated.
-        Otherwise, the entire cache is cleared.
-        """
-        with self._sync_count_cache_lock:
-            if entity_path:
-                cache_key = entity_path.lower().rstrip('/')
-                if cache_key in self._sync_count_cache:
-                    del self._sync_count_cache[cache_key]
-                    logger.debug(f"Invalidated sync cache for {entity_path}")
-            else:
-                self._sync_count_cache.clear()
-                logger.debug("Cleared entire sync cache")
+        self._sync_manager.invalidate_sync_cache(entity_path)
 
     def _clear_ui_on_no_selection(self):
         """Clear all UI elements when no item is selected."""
@@ -8193,221 +4119,38 @@ class AppDialog(QWidget):
     # ---------------------------------------------------
 
     def get_current_sg_data(self):
-        """
-        Populates self._sg_data with ShotGrid publish data from the source model,
-        filtering out items marked for deletion.
-        """
-        total_file_count = 0
-        self._sg_data = []
-        # self._submitted_data_to_publish = [] # This seems unrelated here, consider removing or moving
-        try:
-            model = self._publish_model  # Use the source model directly
-            # logger.debug(">>>>>>>>>> In get_current_sg_data model.rowCount() is {}".format(model.rowCount()))
-            if model.rowCount() > 0:
-                items_to_keep = []
-
-                for row in range(model.rowCount()):
-                    source_index = model.index(row, 0)  # Index from the source model
-                    item = model.itemFromIndex(source_index)
-
-                    if not item: continue  # Skip if item is somehow None
-
-                    is_folder = item.data(SgLatestPublishModel.IS_FOLDER_ROLE)
-                    if not is_folder:
-                        total_file_count += 1
-                        sg_item = item.get_sg_data()  # Get data directly from source item
-                        if not sg_item: continue  # Skip if no sg_data
-
-                        action = sg_item.get("action") or sg_item.get("headAction") or None
-
-                        if action and action in ["delete"]:
-                            # logger.debug(f"Skipping item marked for deletion: {sg_item.get('code')}")
-                            pass  # Skip this item
-                        else:
-                            # Keep this item's data
-                            items_to_keep.append(sg_item)
-                    # else: Folder item, ignore for self._sg_data
-
-
-                self._sg_data = items_to_keep
-                # logger.debug(f"Kept {len(self._sg_data)} non-deleted items for self._sg_data.")
-
-        except Exception as e:
-            logger.error(f"Error in get_current_sg_data: {e}", exc_info=True)
-            self._sg_data = []  # Ensure it's reset on error
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.get_current_sg_data()
+        self._sg_data = self._publish_integration._sg_data
 
     def get_current_publish_data(self, entity_id, entity_type):
-        self._sg_data = []
-        logger.debug("Entity type is {}".format(entity_type))
-        if entity_id and entity_type:
-            filters = [[]]
-            if entity_type == "Asset":
-                filters = [
-                     ["entity.Asset.id", "is", entity_id],
-                ]
-            elif entity_type == "Shot":
-                filters = [
-                    ["entity.Shot.id", "is", entity_id],
-                ]
-            elif entity_type == "Task":
-                filters = [
-                    ["task.Task.id", "is", entity_id],
-                ]
-
-            entity_published_files = self._app.shotgun.find(
-                "PublishedFile",
-                filters,
-                ["entity", "path_cache", "path", "version_number", "step"],
-                #["entity", "path_cache", "path", "version_number", "name", "description", "created_at", "created_by", "image", "published_file_type", "task","],
-            )
-            """
-            # Exclude published files associated with child entities
-            published_files = []
-            for published_file in entity_published_files:
-                if published_file["entity"]["id"] == entity_id:
-                    published_files.append(published_file)
-            """
-
-            # self._sg_data = published_files
-            self._sg_data = entity_published_files
-            #logger.debug(">>>>>>>>>>  Published files are: {}".format(self._sg_data))
-        else:
-            logger.debug("Unable to get current publish data, entity_id or entity_type is None")
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.get_current_publish_data(entity_id, entity_type)
+        self._sg_data = self._publish_integration._sg_data
 
     def _update_perforce_data(self):
-        #logger.debug(">>>>>>>>>>  _get_perforce_data: START")
-        msg = "\n <span style='color:#2C93E2'>Retrieving Data from Perforce...</span> \n"
-        self._add_log(msg, 2)
-        try:
-            self._get_perforce_data()
-            msg = "\n <span style='color:#2C93E2'>Perforce Data Retrieval Completed Successfully</span> \n"
-        except:
-            msg = "\n <span style='color:#2C93E2'>Perforce Data Retrieval Failed</span> \n"
-        self._add_log(msg, 2)
-
-        """
-        #self._publish_model.async_refresh()
-        msg = "\n <span style='color:#2C93E2'>Updating data ...</span> \n"
-        self._add_log(msg, 2)
-        logger.debug(">>>>>>>>>>  update_fstat_data...")
-        self._update_fstat_data()
-       
-        logger.debug(">>>>>>>>>>  fix_fstat_dict...")
-        self._fix_fstat_dict()
-        """
-
-
-        # self._get_depot_files_to_publish()
-
-        #msg = "\n <span style='color:#2C93E2'>Soft refreshing data ...</span> \n"
-        #self._add_log(msg, 2)
-        #logger.debug(">>>>>>>>>>  publish_model.async_refresh...")
-        self._publish_model.async_refresh()
-        #logger.debug(">>>>>>>>>>  _get_perforce_data: DONE")
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.set_entity_path(self._entity_path)
+        self._publish_integration._update_perforce_data()
+        self._fstat_dict = self._publish_integration._fstat_dict
+        self._item_path_dict = self._publish_integration._item_path_dict
 
     def print_publish_data(self):
-        if self._submitted_data_to_publish:
-            msg = "\n <span style='color:#2C93E2'>List of unpublished depot files:</span> \n"
-            self._add_log(msg, 2)
-            for sg_item in self._submitted_data_to_publish:
-                if 'path' in sg_item:
-                    file_to_publish = sg_item['path'].get('local_path', None)
-                    msg = "{}".format(file_to_publish)
-                    self._add_log(msg, 4)
-            msg = "\n <span style='color:#2C93E2'>Click on 'Fix Files' to publish above files</span> \n"
-            self._add_log(msg, 2)
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.print_publish_data()
 
     def _update_fstat_data(self):
-        """Update the fstat data for the selected entity"""
-        # Get the selected item
-        selected_item = self._get_selected_entity()
-        # Get the entity data
-        entity_data = self._load_publishes_for_entity_item(selected_item)
-        # Get the entity path, id and type
-        self._entity_path, entity_id, entity_type = self._get_entity_info(entity_data)
-        # Get the current publish data
-        self.get_current_publish_data(entity_id, entity_type)
-
-        if self._fstat_dict:
-            if self._sg_data:
-                for sg_item in self._sg_data:
-                    # logger.debug(">>>>>>>>>>Checking for published file ...")
-                    #logger.debug(">>>>>>>>>>sg_item {}".format(sg_item))
-                    sg_item_path = sg_item.get("path", None)
-                    if sg_item_path:
-                        if "local_path" in sg_item_path:
-                            local_path = sg_item_path.get("local_path", None)
-                            key = self._create_key(local_path)
-                            version_number = sg_item.get("version_number", None)
-                            # Get the version number from the path if it exists
-                            if version_number:
-                                version_number = int(version_number)
-                                key = "{}#{}".format(key, version_number)
-                            else:
-                                # Get the revision number from the path if it exists
-                                have_rev = sg_item.get("haveRev", None)
-                                if have_rev:
-                                    have_rev = int(have_rev)
-                                    key = "{}#{}".format(key, have_rev)
-                                else:
-                                    key = "{}#{}".format(key, 1)
-                            depot_file = sg_item.get('depotFile', None)
-                            #if depot_file:
-                            #    if 'Original_maleLeather_pants' in depot_file:
-                            #        logger.debug(">>>>>>>>>  sg_item is: {}".format(sg_item))
-                            #        logger.debug(">>>>>>>>>> key is {}".format(key))
-
-                            if key and key in self._fstat_dict:
-                                self._fstat_dict[key]["Published"] = True
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._update_fstat_data()
+        self._fstat_dict = self._publish_integration._fstat_dict
 
     def _fix_fstat_dict(self):
-
-        for key in self._fstat_dict:
-            file_path = self._fstat_dict[key].get("clientFile", None)
-            #logger.debug("----->>>>>>>    self._fstat_dict[key]: {}".format(self._fstat_dict[key]))
-            # logger.debug("----->>>>>>>    file_path: {}".format(file_path))
-            if file_path:
-                self._fstat_dict[key]["name"] = os.path.basename(file_path)
-                self._fstat_dict[key]["path"] = {}
-                self._fstat_dict[key]["path"]["local_path"] = file_path
-
-            #have_rev = self._fstat_dict[key].get('haveRev', "0")
-            head_rev = self._fstat_dict[key].get('headRev', "0")
-            #self._fstat_dict[key]["revision"] = "#{}/{}".format(have_rev, head_rev)
-            self._fstat_dict[key]["code"] = "{}#{}".format(self._fstat_dict[key].get("name", None), head_rev)
-            p4_status = self._fstat_dict[key].get("headAction", None)
-            self._fstat_dict[key]["sg_status_list"] = self._get_p4_status(p4_status)
-
-            self._fstat_dict[key]["depot_file_type"] = self._get_publish_type(file_path)
-            """
-            depot_path = self._fstat_dict[key].get("depotFile", None)
-            if depot_path:
-                description, p4_user = self._get_file_log(depot_path, head_rev)
-                if description:
-                    self._fstat_dict[key]["description"] = description
-                if p4_user:
-                    self._fstat_dict[key]["p4_user"] = p4_user
-            """
-
-            #self._submitted_data_to_publish.append(sg_item)
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._fix_fstat_dict()
 
     def _get_submitted_changelists(self, folder_path):
-        try:
-            if not self._p4.connected():
-                self._p4.connect()
-            changes = self._p4.run_changes('-s', 'submitted', f"{folder_path}/...")
-            if not isinstance(changes, list):
-                logger.error(f"Expected list of changes, got {type(changes)} for path {folder_path}")
-                return []
-            for change in changes:
-                key = change.get('change')
-                if key and key not in self._submitted_changes:
-                    self._submitted_changes[key] = change
-            return changes
-        except Exception as e:
-            logger.error(f"Failed to retrieve submitted changelists for {folder_path}: {e}")
-            return []
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_submitted_changelists(folder_path)
 
     def _get_depot_files_to_publish(self):
         for key, sg_item in self._fstat_dict.items():
@@ -8625,120 +4368,17 @@ class AppDialog(QWidget):
 
 
     def _on_publish_model_action(self, action):
-        selected_actions = []
-        selected_files_to_revert = []
-        selected_files_to_sync = []  # Added for sync action
-        selected_indexes = self.ui.publish_view.selectionModel().selectedIndexes()
-        self._submitted_data_to_publish = []
-        for model_index in selected_indexes:
-            proxy_model = model_index.model()
-            source_index = proxy_model.mapToSource(model_index)
-            item = source_index.model().itemFromIndex(source_index)
-
-            is_folder = item.data(SgLatestPublishModel.IS_FOLDER_ROLE)
-            if not is_folder:
-                sg_item = shotgun_model.get_sg_data(model_index)
-
-                if sg_item and "path" in sg_item:  # Ensure sg_item is not None
-                    if "local_path" in sg_item["path"]:
-                        target_file = sg_item["path"].get("local_path", None)
-                        depot_file = sg_item.get("depotFile", None)
-                        if action in ["fix"]:
-                            # This part is for items that are not yet "PublishedFile" type
-                            # The sync action in the context menu appears for these items too.
-                            published_file_type = sg_item.get("published_file_type",
-                                                              None)  # Check if it's a proper publish
-                            is_sg_published_file_type = sg_item.get("type") == "PublishedFile"
-
-                            if not published_file_type and not is_sg_published_file_type:  # Heuristic: if not a SG publish type
-                                msg = "Fixing file {} ...".format(target_file)
-                                self._add_log(msg, 3)
-                                self._submitted_data_to_publish.append(sg_item)
-                            else:
-                                msg = "File {} is already considered published or is of a published type. 'Fix' not applicable.".format(
-                                    target_file)
-                                self._add_log(msg, 2)
-
-                        if action in ["add", "move/add", "edit", "delete"]:
-                            sg_item_action = sg_item.get("action", None)
-                            if sg_item_action and sg_item_action == "delete":
-                                msg = "Cannot perform the action on the file {} as it has already been marked for deletion or is deleted.".format(
-                                    depot_file)
-
-                                self._add_log(msg, 2)
-                                continue
-
-                            if action == "delete":
-                                msg = "Marking file {} for deletion ...".format(depot_file)
-                            else:
-                                msg = "{} file {}".format(action, depot_file)
-                            self._add_log(msg, 2)
-                            selected_actions.append((sg_item, action))
-
-
-                        elif action == "revert":
-                            # Collect files to revert instead of reverting immediately
-                            if target_file:
-                                selected_files_to_revert.append(target_file)
-                                msg = "Preparing to revert file {} ...".format(target_file)
-                                self._add_log(msg, 3)
-
-                        elif action == "sync":
-                            # Collect files to sync
-                            if target_file:
-                                selected_files_to_sync.append(target_file)
-                                msg = "Preparing to sync file {} ...".format(target_file)
-                                self._add_log(msg, 3)
-
-        if self._submitted_data_to_publish:  # This is for "fix" action
-            self._on_fix_list()
-
-        # --- Perform bulk revert after the loop ---
-        if action == "revert" and selected_files_to_revert:
-            try:
-                msg = f"Reverting {len(selected_files_to_revert)} selected file(s)..."
-                self._add_log(msg, 2)
-                # Use argument unpacking (*) to pass all files at once
-                p4_result = self._p4.run("revert", *selected_files_to_revert)
-                logger.debug(f"Bulk revert result: {p4_result}")
-                if p4_result:  # Check if the command was successful (might need adjustment based on p4python output)
-                    self.refresh_publish_data()  # Refresh data once after bulk operation
-            except Exception as e:
-                logger.error(f"Error during bulk revert: {e}")
-                self._add_log(f"Error during bulk revert: {e}", 2)  # Show error in log window
-
-        # --- Perform bulk sync after the loop ---
-        if action == "sync" and selected_files_to_sync:
-            try:
-                msg = f"Syncing {len(selected_files_to_sync)} selected file(s)..."
-                self._add_log(msg, 2)
-                self._do_sync_files_threading_thread_2(selected_files_to_sync)
-                # After syncing, refresh the data
-                self.refresh_publish_data()
-                # Optionally, if you need to update the column view specifically after sync
-                # self._populate_column_view_widget() # or self._set_column_view_mode()
-                msg = f"Syncing of {len(selected_files_to_sync)} file(s) complete."
-                self._add_log(msg, 2)
-            except Exception as e:
-                logger.error(f"Error during bulk sync: {e}")
-                self._add_log(f"Error during bulk sync: {e}", 2)
-
-        if selected_actions:
-            self.perform_changelist_selection(selected_actions)
-        # logger.debug(">>>>>>>>>>  publish_model.async_refresh...")
-        self._publish_model.async_refresh()
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.on_publish_model_action(action)
 
     def perform_changelist_selection(self, selected_actions):
-        perform_action = ChangelistSelection(self._p4, selected_actions=selected_actions, parent=self)
-        perform_action.show()
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.perform_changelist_selection(selected_actions)
 
     def refresh_publish_data(self):
-        self._update_perforce_data()
-        self._publish_model.hard_refresh()
-        # self._publish_model.async_refresh()
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration.refresh_publish_data()
 
-    # Todo: Fix this if needed
     def _pubish_file_for_deletion(self, sg_item, depot_file):
 
         # Publish the file for deletion
@@ -9026,262 +4666,41 @@ class AppDialog(QWidget):
         return local_to_depot(local_path)
 
     def _get_perforce_data(self):
-        """
-        Get large Perforce data
-        """
-        self._item_path_dict = defaultdict(int)
-        self._fstat_dict = {}
-        self._submitted_changes = {}
-        self._submitted_data_to_publish = []
-
-        logger.debug("Entity path is: {}".format(self._entity_path))
-        try:
-            if self._entity_path:
-                self._item_path_dict[self._entity_path] += 1
-            elif self._sg_data:
-                for sg_item in self._sg_data:
-                    sg_item_path = sg_item.get("path", None)
-                    if sg_item_path:
-                        local_path = sg_item_path.get("local_path", None)
-                        if local_path:
-                            item_path = os.path.dirname(local_path)
-                            self._item_path_dict[item_path] += 1
-        except Exception as e:
-            pass
-
-        for key in self._item_path_dict:
-            if key:
-                #logger.debug(">>>>>>>>>>  key is: {}".format(key))
-                key = self._convert_local_to_depot(key)
-                key = key.rstrip('/')
-                # Retry fstat to handle transient failures
-                max_retries = 3
-                fstat_list = None
-                try:
-                    for attempt in range(max_retries):
-                            fstat_list = self._p4.run_fstat('-Of', key + '/...')
-                            if not isinstance(fstat_list, list):
-                                time.sleep(0.5)
-                                continue
-                            else:
-                                break
-
-                    if not isinstance(fstat_list, list):
-                        # logger.error(f"Failed to retrieve fstat for {key} after {max_retries} attempts")
-                        self._add_log(f"\n Failed to retrieve file status for {key} after {max_retries} retries. \n",2)
-                        fstat_list = []
-                except Exception as e:
-                    fstat_list = []
-
-                if fstat_list:
-                    for fstat in fstat_list:
-                        if isinstance(fstat, list) and len(fstat) == 1:
-                            fstat = fstat[0]
-
-                        client_file = fstat.get('clientFile', None)
-
-                        if client_file:
-                            newkey = self._create_key(client_file)
-                            head_rev = fstat.get('headRev', "0")
-                            newkey = "{}#{}".format(newkey, head_rev)
-                            have_rev = fstat.get('haveRev', "0")
-
-                            if newkey not in self._fstat_dict:
-                                self._fstat_dict[newkey] = fstat
-                                self._fstat_dict[newkey]['Published'] = False
-                                self._fstat_dict[newkey]["revision"] = "#{}/{}".format(have_rev, head_rev)
-
-                                action = fstat.get('action', None) or fstat.get('headAction', None)
-                                if action:
-                                    sg_status = self._get_p4_status(action)
-                                    if sg_status:
-                                        self._fstat_dict[newkey]['sg_status_list'] = sg_status
-                                # get the user and description for submitted changelists
-                                change = fstat.get('headChange', None)
-                                if change and change in self._submitted_changes:
-                                    self._fstat_dict[newkey]['p4_user'] = self._submitted_changes[change]['user']
-                                    self._fstat_dict[newkey]['description'] = self._submitted_changes[change]['desc']
-                            # logger.debug(">>>>>>>>>> self._fstat_dict[newkey] is: {}".format(self._fstat_dict[newkey]))
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        self._publish_integration._get_perforce_data()
+        self._fstat_dict = self._publish_integration._fstat_dict
+        self._item_path_dict = self._publish_integration._item_path_dict
 
     def _get_file_log(self, file_path, head_rev):
-        try:
-            file_path = f"{file_path}#{head_rev}"
-            filelog_list = self._p4.run("filelog", file_path)
-
-            if filelog_list:
-                filelog = filelog_list[0]
-                desc = filelog.get("desc", [""])[0].lstrip('- ').strip()
-                user = filelog.get("user", [""])[0]
-                return desc, user
-            else:
-                return None, None
-        except Exception as e:
-            return None, None
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_file_log(file_path, head_rev)
 
     def _get_publish_type(self, publish_path):
-        """
-        Get a publish type
-        """
-        publish_type = None
-        publish_path = os.path.splitext(publish_path)
-        if len(publish_path) >= 2:
-            extension = publish_path[1]
-
-            # ensure lowercase and no dot
-            if extension:
-                extension = extension.lstrip(".").lower()
-                publish_type = self.settings.get(extension, None)
-                if not publish_type:
-                    # publish type is based on extension
-                    publish_type = "%s File" % extension.capitalize()
-            else:
-                # no extension, assume it is a folder
-                publish_type = "Folder"
-        return publish_type
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_publish_type(publish_path)
 
     def _get_p4_status(self, p4_status):
-        status = self.status_dict.get(p4_status, None)
-        if status:
-            return status.lower()
-        return None
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_p4_status(p4_status)
 
     def _get_small_perforce_data(self, sg_data):
-        """"
-        Get small perforce data
-        """
-
-        if sg_data:
-            for i, sg_item in enumerate(sg_data):
-                if "path" in sg_item:
-                    sg_item_path = sg_item.get("path", None)
-                    if sg_item_path:
-                        local_path = sg_item_path.get("local_path", None)
-                    # logger.debug(">>>>>>> local_path is: {}".format(local_path))
-                        if local_path:
-                            fstat_list = self._p4.run("fstat", local_path)
-                            # logger.debug("fstat_list: {}".format(fstat_list))
-                            fstat = fstat_list[0]
-                            # logger.debug("fstat is: {}".format(fstat))
-                            have_rev = fstat.get('haveRev', "0")
-                            head_rev = fstat.get('headRev', "0")
-                            sg_item["haveRev"], sg_item["headRev"] = have_rev, head_rev
-                            sg_item["revision"] = "{}/{}".format(have_rev, head_rev )
-                            # logger.debug("{}: Revision: {}".format(i, sg_item["revision"]))
-                            # sg_item['depotFile'] = fstat.get('depotFile', None)
-
-            # logger.debug("{}: SG item: {}".format(i, sg_item))
-
-        return sg_data
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._get_small_perforce_data(sg_data)
 
     def _get_latest_revision(self, files_to_sync):
-        for file_path in files_to_sync:
-            p4_result = self._p4.run("sync", "-f", file_path + "#head")
-            logger.debug("Syncing file: {}".format(file_path))
+        self._sync_manager.get_latest_revision(files_to_sync)
 
 
 
     def _find_task_context(self, path):
-        # Try to get the context more specifically from the path on disk
-        tk = sgtk.sgtk_from_path(path)
-        context = tk.context_from_path(path)
-
-        if not context:
-            self.log_debug(f"{path} does not correspond to any context!")
-            return None
-
-        # In case the task folder is not registered for some reason, we can try to find it
-        if not context.task:
-            # Publishing Asset
-            if context.entity["type"] == "CustomEntity03":
-                # We can only hope to match this file if it already is in a Step folder
-                if context.step:
-                    file_name = os.path.splitext(os.path.basename(path))[0]
-                    # Get all the possible tasks for this Asset Step
-                    context_tasks = context.sgtk.shotgun.find("Task", [["entity", "is", context.entity],
-                                                                       ["step", "is", context.step]], ["content"])
-                    for context_task in context_tasks:
-                        # Build the regex pattern using https://regex101.com/r/uK8Ca4/1
-                        task_name = context_task.get("content")
-                        regex = r"\S*(" + re.escape(task_name) + r"){1}(?:_\w*)?$"
-                        matches = re.finditer(regex, file_name)
-                        for matchNum, match in enumerate(matches, start=1):
-                            for group in match.groups():
-                                # Assuming there is only ever one match since the match is at the end of the string
-                                if group == task_name:
-                                    return tk.context_from_entity("Task", context_task["id"])
-                                    # Cinematics
-            elif context.entity["type"] == "Sequence" or context.entity["type"] == "Shot":
-                if context.step:
-                    return self._find_context(tk, context, path)
-            # All other entities
-            else:
-                # This is either an Asset root or an Animation
-                if not context.step:
-                    context_entity = context.sgtk.shotgun.find_one(context.entity["type"],
-                                                                   [["id", "is", context.entity["id"]]],
-                                                                   ["sg_asset_parent", "sg_asset_type"])
-                    # Must be an animation...
-                    if context_entity.get("sg_asset_type") == "Animations":
-                        return self._find_context(tk, context, path)
-
-                elif context.step['name'] == "Animations":
-                    return self._find_context(tk, context, path)
-
-                elif context.step['name'] != "Animations":
-                    # file_folder = os.path.basename(os.path.dirname(path))
-                    step_tasks = context.sgtk.shotgun.find("Task", [["entity", "is", context.entity],
-                                                                    ["step", "is", context.step]],
-                                                           ['content', 'step', 'sg_status_list'])
-                    step_tasks_list = [task for task in step_tasks if task['step'] == context.step]
-                    if len(step_tasks_list) == 1:
-                        return tk.context_from_entity("Task", step_tasks_list[0]["id"])
-                    else:
-                        try:
-                            active_tasks = [task for task in step_tasks if task[
-                                'sg_status_list'] not in inactive_task_states]  # context.sgtk.shotgun.find_one("Task", [["content", "is", file_folder],["entity", "is", context.entity],["step", "is", context.step]])
-                            if len(active_tasks) == 1:
-                                return tk.context_from_entity("Task", active_tasks[0]["id"])
-                                # TODO: Add a check for tasks belonging to the current user if this still doesn't narrow it down
-                        except:
-                            pass
-
-        return context
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._find_task_context(path)
 
     def _find_context(self, tk, context, path):
-        file_name = os.path.splitext(os.path.basename(path))[0]
-        # SWC JR: This could get slow if there are a lot of tasks, not sure if there is a way to query instead
-        tasks = context.sgtk.shotgun.find("Task", [["entity", "is", context.entity]], ['content'])
-        match_length = len(file_name)
-        new_context_id = None
-
-        for task in tasks:
-            task_content = task['content']
-            new_length = len(file_name) - len(task_content)
-            if f"_{task_content}" in file_name and new_length < match_length:
-                # We found a matching task
-                new_context_id = task['id']
-                # This is the new best task
-                match_length = new_length
-
-        if new_context_id:
-            context = tk.context_from_entity("Task", new_context_id)
-
-        return context
-
-
-    ################################################################################################
-# Helper stuff
-
+        """Compatibility wrapper -- delegates to PublishIntegration."""
+        return self._publish_integration._find_context(tk, context, path)
 
 class EntityPreset(object):
-    """
-    Little struct that represents one of the tabs / presets in the
-    Left hand side entity tree view
-    """
-
     def __init__(self, name, entity_type, model, proxy_model, view, publish_filters):
         self.model = model
         self.proxy_model = proxy_model
@@ -9301,21 +4720,6 @@ class UIWaitThread(QThread):
             time.sleep(1)
             ui_is_open = self.check_ui_closed_callback()
             logger.debug("UI is open: {}".format(ui_is_open))
-        logger.debug("UI is closed, Updating pending view")
-        self.parent().update_pending_view_signal.emit()
-
-class UIWaitThreadOLD(QThread):
-    def __init__(self, check_ui_closed_callback, parent=None):
-        super(UIWaitThread, self).__init__(parent)
-        self.check_ui_closed_callback = check_ui_closed_callback
-
-    def run(self):
-        ui_is_open = True
-        while ui_is_open:
-            time.sleep(1)
-            ui_is_open = self.check_ui_closed_callback()
-            logger.debug("UI is open: {}".format(ui_is_open))
-        # When the loop exits (UI is closed), emit a signal to update the UI
         logger.debug("UI is closed, Updating pending view")
         self.parent().update_pending_view_signal.emit()
 
