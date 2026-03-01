@@ -121,6 +121,8 @@ class AppDialog(QWidget):
     selection_changed = QtCore.Signal()
     # signal emitted when background sync count queries complete
     sync_counts_ready = QtCore.Signal(list)
+    # signal emitted when background perforce data retrieval completes
+    perforce_data_ready = QtCore.Signal(dict, dict, list, str)
 
     def __init__(self, action_manager, parent=None):
         super(AppDialog, self).__init__()  # Ensure proper parent initialization
@@ -551,6 +553,10 @@ class AppDialog(QWidget):
         self._load_entity_presets()
         _t_entity_presets = time.perf_counter() - _t0
         self.sync_counts_ready.connect(self._on_sync_counts_ready)
+        self.perforce_data_ready.connect(self._on_perforce_data_ready)
+        self._perforce_data_generation = 0
+        self._perforce_data_cache = {}  # entity_path → (fstat_dict, item_path_dict)
+        self._deferred_publish_item = None  # set when publish load deferred until P4 data ready
 
         # load visibility state for details pane
         show_details = self._settings_manager.retrieve("show_details", False)
@@ -1416,6 +1422,156 @@ class AppDialog(QWidget):
             desc_item.setIcon(sync_icon if sync_icon else QIcon())
         logger.debug("Sync counts applied (%d items).", len(results))
 
+    def _perforce_data_worker(self, entity_path, sg_data, generation):
+        """
+        Background worker: runs P4 fstat queries for the selected entity.
+        Reproduces PublishIntegration._get_perforce_data() logic using a
+        thread-local P4 connection. Emits perforce_data_ready when done.
+        """
+        thread_p4 = None
+        logger.info("[DIAG] _perforce_data_worker START: entity_path=%s, sg_data_count=%d, gen=%d",
+                    entity_path, len(sg_data), generation)
+        import time as _time
+        _t0 = _time.time()
+        try:
+            thread_p4 = self._sync_manager.create_thread_connection()
+
+            # Build item_path_dict (same logic as publish_integration lines 1641-1653)
+            item_path_dict = defaultdict(int)
+            if entity_path:
+                item_path_dict[entity_path] += 1
+            elif sg_data:
+                for sg_item in sg_data:
+                    sg_item_path = sg_item.get("path", None)
+                    if sg_item_path:
+                        local_path = sg_item_path.get("local_path", None)
+                        if local_path:
+                            item_path = os.path.dirname(local_path)
+                            item_path_dict[item_path] += 1
+
+            fstat_dict = {}
+            for key in item_path_dict:
+                if not key:
+                    continue
+                depot_key = local_to_depot(key).rstrip('/')
+                max_retries = 3
+                fstat_list = None
+                try:
+                    for attempt in range(max_retries):
+                        fstat_list = thread_p4.run_fstat('-Of', depot_key + '/...')
+                        if not isinstance(fstat_list, list):
+                            time.sleep(0.5)
+                            continue
+                        else:
+                            break
+                    if not isinstance(fstat_list, list):
+                        fstat_list = []
+                except Exception:
+                    fstat_list = []
+
+                for fstat in fstat_list:
+                    if isinstance(fstat, list) and len(fstat) == 1:
+                        fstat = fstat[0]
+                    if not isinstance(fstat, dict):
+                        continue
+                    client_file = fstat.get('clientFile', None)
+                    if client_file:
+                        newkey = PerforceSyncManager.create_key(client_file)
+                        head_rev = fstat.get('headRev', "0")
+                        newkey = "{}#{}".format(newkey, head_rev)
+                        have_rev = fstat.get('haveRev', "0")
+                        if newkey not in fstat_dict:
+                            fstat_dict[newkey] = fstat
+                            fstat_dict[newkey]['Published'] = False
+                            fstat_dict[newkey]["revision"] = "#{}/{}".format(have_rev, head_rev)
+                            action = fstat.get('action', None) or fstat.get('headAction', None)
+                            if action:
+                                sg_status = constants.STATUS_MAP.get(action)
+                                if sg_status:
+                                    fstat_dict[newkey]['sg_status_list'] = sg_status.lower()
+
+            # Always cache the results so revisiting this entity is instant,
+            # even if the user has navigated away and this generation is stale.
+            self._perforce_data_cache[entity_path] = (fstat_dict, dict(item_path_dict))
+
+            # Only emit the signal (which triggers UI updates + deferred
+            # publish load) if this result is still current.
+            if generation == self._perforce_data_generation:
+                logger.info("[DIAG] _perforce_data_worker DONE in %.2fs: fstat_dict=%d entries, emitting signal (gen=%d)",
+                            _time.time() - _t0, len(fstat_dict), generation)
+                self.perforce_data_ready.emit(
+                    fstat_dict, dict(item_path_dict), sg_data, entity_path
+                )
+            else:
+                logger.info("[DIAG] _perforce_data_worker STALE in %.2fs: gen=%d vs current=%d, cached but not applied",
+                            _time.time() - _t0, generation, self._perforce_data_generation)
+        except Exception as e:
+            logger.error(f"Background P4 data retrieval failed: {e}", exc_info=True)
+        finally:
+            if thread_p4:
+                try:
+                    thread_p4.disconnect()
+                except Exception:
+                    pass
+
+    def _on_perforce_data_ready(self, fstat_dict, item_path_dict, sg_data, entity_path):
+        """
+        Slot: receives perforce data from background thread, updates instance
+        state and refreshes dependent views. Runs on main thread.
+        """
+        logger.info("[DIAG] _on_perforce_data_ready ENTER: entity_path=%s, current=%s, fstat_dict=%d, main_view_mode=%s",
+                    entity_path, self._entity_path, len(fstat_dict), self.main_view_mode)
+
+        # Stale check: if user navigated away, discard
+        if self._entity_path != entity_path:
+            logger.info("[DIAG] _on_perforce_data_ready STALE — discarding (signal=%s, current=%s)",
+                        entity_path, self._entity_path)
+            return
+
+        # Cache the results for this entity path
+        self._perforce_data_cache[entity_path] = (fstat_dict, item_path_dict)
+
+        # Populate instance vars (same as _update_perforce_data wrapper)
+        self._fstat_dict = fstat_dict
+        self._item_path_dict = item_path_dict
+
+        # Update publish_integration's copies for other callers
+        self._publish_integration._fstat_dict = fstat_dict
+        self._publish_integration._item_path_dict = item_path_dict
+
+        # Push data to ViewManager so column view can populate
+        self._view_manager.set_sg_data(self._sg_data)
+        self._view_manager.set_item_path_dict(self._item_path_dict)
+        self._view_manager.set_entity_path(self._entity_path)
+        self._view_manager.set_fstat_dict(fstat_dict)
+
+        # If we deferred the publish load (cache miss path), trigger it now
+        # that fstat data is available. _load_publishes_for_entity_item
+        # creates a NEW data handler, so we set prefetched data AFTER it.
+        deferred_item = getattr(self, '_deferred_publish_item', None)
+        if deferred_item is not None:
+            self._deferred_publish_item = None
+            logger.info("[DIAG] _on_perforce_data_ready: triggering deferred _load_publishes_for_entity_item")
+            self._load_publishes_for_entity_item(deferred_item)
+            # Set prefetched data on the NEW handler (created by load_data)
+            # before the async SG callback fires update_data.
+            self._publish_model.set_prefetched_fstat_dict(fstat_dict)
+            # Get SG data now that publish model is loaded
+            self.get_current_sg_data()
+            self._view_manager.set_sg_data(self._sg_data)
+        else:
+            # Publish model already loaded — set prefetched data on existing
+            # handler in case update_data hasn't fired yet.
+            self._publish_model.set_prefetched_fstat_dict(fstat_dict)
+
+        logger.info("[DIAG] _on_perforce_data_ready: calling _refresh_dependent_views")
+
+        # Refresh dependent views now that data is available
+        self._refresh_dependent_views()
+
+        self._add_log("\n <span style='color:#2C93E2'>Perforce Data Retrieval Completed</span> \n", 2)
+        logger.info("[DIAG] _on_perforce_data_ready COMPLETE for %s (%d fstat entries)", entity_path, len(fstat_dict))
+
     def _get_latest(self):
         logger.debug("Getting latest...")
         self._on_sync_current()
@@ -1837,9 +1993,12 @@ class AppDialog(QWidget):
 
     def _populate_column_view_widget(self):
         """Compatibility wrapper -- delegates to ViewManager."""
+        logger.info("[DIAG] _populate_column_view_widget (dialog wrapper): entity_path=%s, sg_data=%d, fstat_dict=%d, item_path_dict=%d",
+                    self._entity_path, len(self._sg_data), len(self._fstat_dict), len(self._item_path_dict))
         self._view_manager.set_sg_data(self._sg_data)
         self._view_manager.set_item_path_dict(self._item_path_dict)
         self._view_manager.set_entity_path(self._entity_path)
+        self._view_manager.set_fstat_dict(self._fstat_dict)
         self._view_manager.populate_column_view_widget()
         # Update compatibility aliases
         self.column_view_model = self._view_manager.column_view_model
@@ -4063,10 +4222,7 @@ class AppDialog(QWidget):
         self._add_file_history_record(self._current_entity_preset, selected_item)
         self._setup_file_details_panel([])  # Clear details panel initially
 
-        # 6. Load publishes for the selected item (handles both entities and folders)
-        self._load_publishes_for_entity_item(selected_item)
-
-        # 7. Handle specific entity selection
+        # 6. Handle specific entity selection
         if is_specific_entity:
             logger.debug(f"Processing as specific entity: {self._entity_data}")
 
@@ -4074,22 +4230,73 @@ class AppDialog(QWidget):
             self._entity_path, entity_id, entity_type = self._get_entity_info(self._entity_data)
             logger.debug(f"Entity path determined as: {self._entity_path}")
 
-            # Skip all P4 queries for Project entities — scanning the entire
-            # depot is extremely slow and yields no useful information.
+            # Skip all P4 queries for Project entities
             if entity_type == "Project":
                 logger.debug("Skipping P4 queries for Project entity.")
+                self._load_publishes_for_entity_item(selected_item)
                 target_entity_for_panel = self._resolve_entity_for_panel(self._entity_data)
                 QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(target_entity_for_panel))
                 self._refresh_dependent_views()
                 return
 
-            # Update sync count display for this entity
-            if self._entity_path:
-                self._update_sync_count_for_selected_item(selected_item, self._entity_path, entity_id, entity_type)
+            # Supply cached P4 fstat data to the publish model BEFORE
+            # loading publishes, so the framework's update_data callback
+            # can skip its synchronous P4 query.
+            cached = self._perforce_data_cache.get(self._entity_path)
+            if cached:
+                fstat_dict, item_path_dict = cached
+                logger.info("[DIAG] Cache HIT for %s — %d fstat entries available",
+                            self._entity_path, len(fstat_dict))
+                self._fstat_dict = fstat_dict
+                self._item_path_dict = item_path_dict
+                self._publish_integration._fstat_dict = fstat_dict
+                self._publish_integration._item_path_dict = item_path_dict
 
-            # Get current SG data and Perforce data
-            self.get_current_sg_data()
-            self._update_perforce_data()
+                # Load publishes first — this creates a NEW data handler
+                self._load_publishes_for_entity_item(selected_item)
+                # Set prefetched data AFTER load_data created the new handler
+                # but BEFORE the async SG callback fires update_data.
+                self._publish_model.set_prefetched_fstat_dict(fstat_dict)
+
+                # Update sync count display for this entity (background thread)
+                if self._entity_path:
+                    self._update_sync_count_for_selected_item(selected_item, self._entity_path)
+
+                # Get current SG data (model iteration — fast, no P4)
+                self.get_current_sg_data()
+
+                # Data already applied above; just refresh views
+                self._view_manager.set_sg_data(self._sg_data)
+                self._view_manager.set_item_path_dict(self._item_path_dict)
+                self._view_manager.set_entity_path(self._entity_path)
+                self._view_manager.set_fstat_dict(fstat_dict)
+                self._refresh_dependent_views()
+            else:
+                logger.info("[DIAG] Cache MISS for %s — deferring publish load until P4 data ready", self._entity_path)
+
+                # Clear stale data from previous entity so the user sees
+                # that a new selection is loading.
+                self._view_manager.clear_dependent_views()
+
+                # Store selected_item so _on_perforce_data_ready can trigger
+                # the publish load after setting prefetched fstat_dict.
+                self._deferred_publish_item = selected_item
+
+                # Update sync count display for this entity (background thread)
+                if self._entity_path:
+                    self._update_sync_count_for_selected_item(selected_item, self._entity_path)
+
+                # Dispatch background P4 query — publish load will happen
+                # in _on_perforce_data_ready after fstat data is available.
+                self._perforce_data_generation += 1
+                generation = self._perforce_data_generation
+                logger.info("[DIAG] Dispatching background P4 query (gen=%d)", generation)
+                thread = threading.Thread(
+                    target=self._perforce_data_worker,
+                    args=(self._entity_path, [], generation),
+                    daemon=True,
+                )
+                thread.start()
 
             # Resolve entity for panel navigation (handles Tasks correctly)
             target_entity_for_panel = self._resolve_entity_for_panel(self._entity_data)
@@ -4103,14 +4310,16 @@ class AppDialog(QWidget):
             logger.debug(f"Processing as intermediate node: {field_value_from_tree}")
             self._clear_entity_specific_data()
 
+            # Load publishes for the intermediate node
+            self._load_publishes_for_entity_item(selected_item)
+
             # Update sync count for intermediate nodes if applicable
             self._update_sync_count_for_intermediate_node(selected_item)
 
             # Clear the panel since no specific entity is selected
             QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(None))
-
-        # 8. Refresh views that depend on the newly populated data
-        self._refresh_dependent_views()
+            # Refresh views — safe here, no P4 data dependency
+            self._refresh_dependent_views()
 
         logger.debug("Finished _on_treeview_item_selected.")
 
@@ -4119,6 +4328,11 @@ class AppDialog(QWidget):
 
     def _invalidate_sync_cache(self, entity_path=None):
         self._sync_manager.invalidate_sync_cache(entity_path)
+        # Also clear cached perforce data so next selection re-queries
+        if entity_path:
+            self._perforce_data_cache.pop(entity_path, None)
+        else:
+            self._perforce_data_cache.clear()
 
     def _clear_ui_on_no_selection(self):
         """Clear all UI elements when no item is selected."""
@@ -4130,9 +4344,9 @@ class AppDialog(QWidget):
         self._setup_file_details_panel([])
         QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(None))
 
-        if self.main_view_mode == self.MAIN_VIEW_COLUMN:
+        if self._view_manager.main_view_mode == self.MAIN_VIEW_COLUMN:
             self.column_view_model.setRowCount(0)
-        if self.main_view_mode == self.MAIN_VIEW_SUBMITTED:
+        if self._view_manager.main_view_mode == self.MAIN_VIEW_SUBMITTED:
             self._reset_submitted_widget()
 
     def _clear_entity_specific_data(self):
@@ -4157,25 +4371,27 @@ class AppDialog(QWidget):
 
         return entity_data
 
-    def _update_sync_count_for_selected_item(self, selected_item, entity_path, entity_id, entity_type):
+    def _update_sync_count_for_selected_item(self, selected_item, entity_path):
         """
         Update the sync count display for the selected entity item.
-        This is called on-demand when a specific entity is selected.
-        Uses caching for improved performance.
+        Shows 'Checking...' immediately, then dispatches to background thread.
+        Reuses the existing _sync_count_worker / _on_sync_counts_ready pattern.
         """
         try:
-            # First, immediately show "Checking..." status
-            self._display_sync_count_in_tree(selected_item, -1)  # Special value for checking
+            # Immediately show "Checking..." status
+            self._display_sync_count_in_tree(selected_item, -1)
 
-            # Get sync count asynchronously to avoid blocking UI
-            def update_sync_display():
-                # Use cached version for better performance
-                sync_count = self._get_sync_count_for_entity_cached(entity_path)
-                self._display_sync_count_in_tree(selected_item, sync_count)
-                logger.debug(f"Updated sync count for {entity_type} {entity_id}: {sync_count}")
-
-            # Use shorter timer for faster response
-            QtCore.QTimer.singleShot(10, update_sync_display)  # Reduced from 100ms to 10ms
+            # Dispatch to background thread using existing worker
+            source_model = selected_item.model()
+            index = source_model.indexFromItem(selected_item)
+            if index.isValid():
+                persistent = QtCore.QPersistentModelIndex(index)
+                thread = threading.Thread(
+                    target=self._sync_count_worker,
+                    args=([(persistent, entity_path)],),
+                    daemon=True,
+                )
+                thread.start()
 
         except Exception as e:
             logger.error(f"Error updating sync count for selected item: {e}")
@@ -4287,14 +4503,18 @@ class AppDialog(QWidget):
     def _refresh_dependent_views(self):
         """
         Refresh views that depend on the selected entity data.
+        Uses ViewManager.main_view_mode as the source of truth (AppDialog's
+        copy can fall out of sync when mode buttons live on the ViewManager).
         """
-        if self.main_view_mode == self.MAIN_VIEW_COLUMN:
-            logger.debug("Scheduling Column View update.")
-            QtCore.QTimer.singleShot(0, self._set_column_view_mode)
-        elif self.main_view_mode == self.MAIN_VIEW_SUBMITTED:
-            logger.debug("Scheduling Submitted View update.")
+        mode = self._view_manager.main_view_mode
+        logger.info("[DIAG] _refresh_dependent_views: vm.main_view_mode=%s (COLUMN=%s, SUBMITTED=%s)",
+                    mode, self.MAIN_VIEW_COLUMN, self.MAIN_VIEW_SUBMITTED)
+        if mode == self.MAIN_VIEW_COLUMN:
+            logger.info("[DIAG] _refresh_dependent_views: scheduling _populate_column_view_widget via QTimer")
+            QtCore.QTimer.singleShot(0, self._populate_column_view_widget)
+        elif mode == self.MAIN_VIEW_SUBMITTED:
+            logger.info("[DIAG] _refresh_dependent_views: scheduling _populate_submitted_widget via QTimer")
             QtCore.QTimer.singleShot(0, self._populate_submitted_widget)
-        # Add other view modes as needed
 
     def _after_syncing_operations(self):
         """
@@ -4326,7 +4546,7 @@ class AppDialog(QWidget):
         self._publish_model.hard_refresh()
         self._setup_file_details_panel([])
 
-        if self.main_view_mode == self.MAIN_VIEW_COLUMN:
+        if self._view_manager.main_view_mode == self.MAIN_VIEW_COLUMN:
             self._update_perforce_data()
             self._populate_column_view_widget()
 

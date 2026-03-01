@@ -112,6 +112,10 @@ class ViewManager(QtCore.QObject):
         self._standard_item_dict = {}
         self._perforce_sg_data = []
         self._publish_icons = {}
+        self._sg_data = []
+        self._fstat_dict = {}
+        self._item_path_dict = {}
+        self._entity_path = None
 
         # Grouping dictionaries
         self._folder_dict = {}
@@ -168,6 +172,13 @@ class ViewManager(QtCore.QObject):
 
     def set_entity_path(self, entity_path):
         self._entity_path = entity_path
+
+    def clear_dependent_views(self):
+        """Clear column/submitted view data to indicate a new entity is loading.
+        Called on entity selection change before background P4 work completes."""
+        if self.column_view_model is not None:
+            self.column_view_model.removeRows(0, self.column_view_model.rowCount())
+        self._perforce_sg_data = []
 
     # -----------------------------------------------------------------------
     # View mode switching
@@ -373,18 +384,28 @@ class ViewManager(QtCore.QObject):
         self._column_view_dict = {}
         self._standard_item_dict = {}
 
+        logger.info("[DIAG] ViewManager._populate_column_view_widget START: entity_path=%s, sg_data=%d, fstat_dict=%s",
+                    getattr(self, '_entity_path', None), len(self._sg_data) if self._sg_data else 0,
+                    len(self._fstat_dict) if getattr(self, '_fstat_dict', None) else 'None')
+        import time as _time
+        _t0 = _time.time()
         logger.debug("Setting up Column View table ...")
         self._setup_column_view()
         logger.debug("Getting Perforce data...")
         self._perforce_sg_data = self._get_perforce_sg_data()
         length = len(self._perforce_sg_data)
+        logger.info("[DIAG] ViewManager._populate_column_view_widget: _get_perforce_sg_data returned %d items (%.3fs)",
+                    length, _time.time() - _t0)
         if not self._perforce_sg_data:
             self._perforce_sg_data = self._sg_data
         if self._perforce_sg_data and length > 0:
             msg = "\n <span style='color:#2C93E2'>Populating the Column View with {} files. Please wait...</span> \n".format(length)
             self.log_message.emit(msg, 2)
-            logger.debug("Getting Perforce file size...")
+            logger.info("[DIAG] ViewManager: calling _get_perforce_size (fstat_dict available=%s)...",
+                        bool(getattr(self, '_fstat_dict', None)))
+            _t1 = _time.time()
             self._perforce_sg_data = self._get_perforce_size(self._perforce_sg_data)
+            logger.info("[DIAG] ViewManager: _get_perforce_size took %.3fs", _time.time() - _t1)
             logger.debug("Populating Column View table...")
             logger.debug("Updating Column View is complete")
 
@@ -406,6 +427,10 @@ class ViewManager(QtCore.QObject):
     def set_item_path_dict(self, item_path_dict):
         """Set the item path dict for file size lookup."""
         self._item_path_dict = item_path_dict
+
+    def set_fstat_dict(self, fstat_dict):
+        """Set the fstat dict so file sizes can be derived without a P4 query."""
+        self._fstat_dict = fstat_dict
 
     def set_p4_and_helpers(self, p4, create_key_fn, convert_local_to_depot_fn):
         """Set the P4 connection and helper functions needed for column view."""
@@ -571,6 +596,7 @@ class ViewManager(QtCore.QObject):
         from .model_latestpublish import SgLatestPublishModel
         perforce_sg_data = []
         model = self.ui.publish_view.model()
+        logger.info("[DIAG] _get_perforce_sg_data: publish_view model rowCount=%d", model.rowCount())
         if model.rowCount() > 0:
             for row in range(model.rowCount()):
                 model_index = model.index(row, 0)
@@ -585,34 +611,49 @@ class ViewManager(QtCore.QObject):
         return perforce_sg_data
 
     def _get_perforce_size(self, sg_data):
+        """Derive file sizes from the already-fetched fstat_dict rather than
+        making a separate P4 query. Falls back to a P4 query if fstat_dict
+        is not available."""
         try:
             self._size_dict = {}
-            for key in self._item_path_dict:
-                if key:
-                    key = self._convert_local_to_depot(key).rstrip('/')
-                    fstat_list = self._p4.run("fstat", "-T", "fileSize, clientFile", "-Ol", key + '/...')
-                    for fstat in fstat_list:
-                        if fstat:
-                            size = fstat.get("fileSize", "N/A")
-                            if size != "N/A":
-                                size = "{:.2f}".format(int(size) / 1024 / 1024)
-                                size = float(size)
-                            client_file = fstat.get('clientFile', None)
-                            if client_file:
-                                newkey = self._create_key(client_file)
-                                if newkey:
-                                    if newkey not in self._size_dict:
-                                        self._size_dict[newkey] = {}
-                                    self._size_dict[newkey]['fileSize'] = size
+            fstat_dict = getattr(self, '_fstat_dict', None)
 
-                    for i, sg_item in enumerate(sg_data):
-                        if "path" in sg_item:
-                            if "local_path" in sg_item["path"]:
-                                local_path = sg_item["path"].get("local_path", None)
-                                modified_local_path = self._create_key(local_path)
-                                if modified_local_path and modified_local_path in self._size_dict:
-                                    if 'fileSize' in self._size_dict[modified_local_path]:
-                                        sg_item["fileSize"] = self._size_dict[modified_local_path].get('fileSize', None)
+            if fstat_dict:
+                logger.info("[DIAG] _get_perforce_size: using CACHED fstat_dict (%d entries) — NO P4 query", len(fstat_dict))
+                # Build size lookup from cached fstat data (no P4 call)
+                for fstat_key, fstat in fstat_dict.items():
+                    client_file = fstat.get('clientFile', None)
+                    size = fstat.get('fileSize', 'N/A')
+                    if client_file and size != 'N/A':
+                        size = float("{:.2f}".format(int(size) / 1024 / 1024))
+                        newkey = self._create_key(client_file)
+                        if newkey and newkey not in self._size_dict:
+                            self._size_dict[newkey] = {'fileSize': size}
+            else:
+                # Fallback: query P4 directly (original behavior)
+                logger.info("[DIAG] _get_perforce_size: fstat_dict NOT available — FALLING BACK to P4 query (THIS BLOCKS UI)")
+                for key in self._item_path_dict:
+                    if key:
+                        key = self._convert_local_to_depot(key).rstrip('/')
+                        fstat_list = self._p4.run("fstat", "-T", "fileSize, clientFile", "-Ol", key + '/...')
+                        for fstat in fstat_list:
+                            if fstat:
+                                size = fstat.get("fileSize", "N/A")
+                                if size != "N/A":
+                                    size = float("{:.2f}".format(int(size) / 1024 / 1024))
+                                client_file = fstat.get('clientFile', None)
+                                if client_file:
+                                    newkey = self._create_key(client_file)
+                                    if newkey and newkey not in self._size_dict:
+                                        self._size_dict[newkey] = {'fileSize': size}
+
+            # Apply sizes to sg_data items
+            for sg_item in sg_data:
+                if "path" in sg_item and "local_path" in sg_item["path"]:
+                    local_path = sg_item["path"].get("local_path", None)
+                    modified_local_path = self._create_key(local_path)
+                    if modified_local_path and modified_local_path in self._size_dict:
+                        sg_item["fileSize"] = self._size_dict[modified_local_path].get('fileSize', None)
         except Exception as e:
             logger.debug("Error getting Perforce file size: {}".format(e))
         return sg_data
