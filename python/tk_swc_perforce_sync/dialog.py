@@ -22,6 +22,7 @@ for name, cls in QtGui.__dict__.items():
     if isinstance(cls, type): globals()[name] = cls
 
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 
 
@@ -118,6 +119,8 @@ class AppDialog(QWidget):
     # signal emitted whenever the selected publish changes
     # in either the main view or the details file_history view
     selection_changed = QtCore.Signal()
+    # signal emitted when background sync count queries complete
+    sync_counts_ready = QtCore.Signal(list)
 
     def __init__(self, action_manager, parent=None):
         super(AppDialog, self).__init__()  # Ensure proper parent initialization
@@ -128,6 +131,7 @@ class AppDialog(QWidget):
                                 then the default will be used instead
         :param parent:          The parent QWidget for this control
         """
+        _t_init_start = time.perf_counter()
        #QWidget.__init__(self, parent)
         self._action_manager = action_manager
 
@@ -166,9 +170,11 @@ class AppDialog(QWidget):
 
         #################################################
         # Perforce
+        _t0 = time.perf_counter()
         self._fw = sgtk.platform.get_framework("tk-framework-perforce")
         # PerforceSyncManager owns the P4 connection and all sync operations.
         self._sync_manager = PerforceSyncManager(self._app, self._fw, parent=self)
+        _t_p4_connect = time.perf_counter() - _t0
         self._sync_manager.log_message.connect(self._add_log)
         self._sync_manager.progress_update.connect(self._update_progress)
         self._sync_manager.sync_completed.connect(self._after_syncing_operations)
@@ -198,7 +204,9 @@ class AppDialog(QWidget):
         #################################################
         # hook a helper model tracking status codes so we
         # can use those in the UI
+        _t0 = time.perf_counter()
         self._status_model = SgStatusModel(self, self._task_manager)
+        _t_status_model = time.perf_counter() - _t0
 
         #################################################
         # details pane, view mode buttons, refresh/submit — wired after ViewManager creation below
@@ -218,6 +226,7 @@ class AppDialog(QWidget):
 
         ###########################################
         # File History
+        _t0 = time.perf_counter()
         self._publish_file_history_model = SgPublishHistoryModel(self, self._task_manager)
 
         self._publish_file_history_model_overlay = ShotgunModelOverlayWidget(
@@ -278,11 +287,13 @@ class AppDialog(QWidget):
 
         # if an item in the list is double clicked the default action is run
         self.ui.file_history_view.doubleClicked.connect(self._on_file_history_double_clicked)
+        _t_file_history = time.perf_counter() - _t0
         ###########################################
         # Entity Parents publish model
         self._temp_dir = tempfile.mkdtemp()
 
         # load and initialize cached publish type model
+        _t0 = time.perf_counter()
         self._entity_parents_type_model = SgPublishTypeModel(
             self, self._action_manager, self._settings_manager, self._task_manager
         )
@@ -318,8 +329,10 @@ class AppDialog(QWidget):
         self._publish_entity_parents_proxy.setDynamicSortFilter(True)
         self._publish_entity_parents_proxy.sort(0, Qt.DescendingOrder)
 
+        _t_entity_parents_models = time.perf_counter() - _t0
         #################################################
         # load and initialize cached publish type model
+        _t0 = time.perf_counter()
         self._publish_type_model = SgPublishTypeModel(
             self, self._action_manager, self._settings_manager, self._task_manager
         )
@@ -329,8 +342,10 @@ class AppDialog(QWidget):
             self._publish_type_model, self.ui.publish_type_list
         )
 
+        _t_publish_type_model = time.perf_counter() - _t0
         #################################################
         # setup publish model
+        _t0 = time.perf_counter()
         self._publish_model = SgLatestPublishModel(
             self, self._publish_type_model, self._task_manager
         )
@@ -357,9 +372,11 @@ class AppDialog(QWidget):
             self.ui.publish_view, self._action_manager
         )
 
+        _t_publish_model = time.perf_counter() - _t0
         #################################################
         # ViewManager — owns view mode switching, column view, details pane,
         # publish view interaction, and filtering.
+        _t0 = time.perf_counter()
         self._view_manager = ViewManager(
             self._app, self.ui, self._settings_manager, self._action_manager,
             self._publish_model, self._publish_proxy_model, self._status_model,
@@ -524,12 +541,16 @@ class AppDialog(QWidget):
         self._reload_action.triggered.connect(self._on_reload_action)
         self.ui.cog_button.addAction(self._reload_action)
 
+        _t_view_manager = time.perf_counter() - _t0
         #################################################
         # set up preset tabs and load and init tree views
         self._entity_presets = {}
         self._current_entity_preset = None
 
+        _t0 = time.perf_counter()
         self._load_entity_presets()
+        _t_entity_presets = time.perf_counter() - _t0
+        self.sync_counts_ready.connect(self._on_sync_counts_ready)
 
         # load visibility state for details pane
         show_details = self._settings_manager.retrieve("show_details", False)
@@ -543,6 +564,7 @@ class AppDialog(QWidget):
         #################################################
         # PublishIntegration — owns publishing workflows, pending/submitted views,
         # changelist operations, CLI submission, fix operations.
+        _t0 = time.perf_counter()
         self._publish_integration = PublishIntegration(
             self._app, self.ui, self._sync_manager, parent=self
         )
@@ -573,14 +595,17 @@ class AppDialog(QWidget):
         # Wire buttons that depend on _publish_integration
         self.ui.submit_files.clicked.connect(self._publish_integration._on_submit_files)
 
+        _t_publish_integration = time.perf_counter() - _t0
         #################################################
         # EntityBrowser — owns entity detail panels, parent/children,
         # breadcrumbs, entity path resolution, filesystem operations.
+        _t0 = time.perf_counter()
         self._entity_browser = EntityBrowser(
             self._app, self.ui, self._sync_manager, parent=self
         )
         self._entity_browser.log_message.connect(self._add_log)
 
+        _t_entity_browser = time.perf_counter() - _t0
                 #################################################
         self._root_path = self._app.sgtk.roots.get('primary', None)
         # logger.debug("root_path:{}".format(self._root_path))
@@ -589,7 +614,9 @@ class AppDialog(QWidget):
             self._drive = self._root_path[0:2]
 
         # "delete" change
+        _t0 = time.perf_counter()
         self.default_changelist = self._p4.fetch_change()
+        _t_fetch_change = time.perf_counter() - _t0
         # self.default_changelist = "0"
         self._actions_change = self.default_changelist.get("Change")
         # self._actions_change = create_change(self._p4, "Perform actions")
@@ -625,14 +652,34 @@ class AppDialog(QWidget):
         ##########################################################################################
         self.submitter_widget = None
         ##########################################################################################
-        # Schedule refresh_entity_preset_tabs to run after a 5-second delay
-        # This allows initial UI setup and asynchronous data loading (e.g., P4 connection,
-        # initial model loads) to progress before attempting this potentially heavy refresh.
-        initial_refresh_delay_ms = 5000  # 5 seconds
-        QtCore.QTimer.singleShot(initial_refresh_delay_ms, self.refresh_entity_preset_tabs)
-        logger.debug(
-            f"Scheduled a delayed call to refresh_entity_preset_tabs in {initial_refresh_delay_ms / 1000} seconds."
-        )
+        # Connect each preset model's data_refreshed signal so that sync counts
+        # are gathered once the ShotGrid data actually arrives (instead of a
+        # fixed timer that may fire before the model has loaded its children).
+        # Use a debounce timer so multiple model refreshes coalesce into one scan.
+        self._sync_count_debounce_timer = QTimer(self)
+        self._sync_count_debounce_timer.setSingleShot(True)
+        self._sync_count_debounce_timer.setInterval(2000)  # 2s after last model refresh
+        self._sync_count_debounce_timer.timeout.connect(self.refresh_entity_preset_tabs)
+        for preset_name, preset in self._entity_presets.items():
+            preset.model.data_refreshed.connect(self._sync_count_debounce_timer.start)
+            logger.debug(f"Connected data_refreshed signal for preset '{preset_name}'")
+
+        # === Startup Timing Summary ===
+        _t_init_total = time.perf_counter() - _t_init_start
+        logger.info("=== P4SG STARTUP TIMING ===")
+        logger.info("  P4 Connect:            %.3fs", _t_p4_connect)
+        logger.info("  Status Model:          %.3fs", _t_status_model)
+        logger.info("  File History Models:    %.3fs", _t_file_history)
+        logger.info("  Entity Parents Models:  %.3fs", _t_entity_parents_models)
+        logger.info("  Publish Type Model:     %.3fs", _t_publish_type_model)
+        logger.info("  Publish Model + Proxy:  %.3fs", _t_publish_model)
+        logger.info("  ViewManager:            %.3fs", _t_view_manager)
+        logger.info("  Entity Presets:         %.3fs", _t_entity_presets)
+        logger.info("  PublishIntegration:     %.3fs", _t_publish_integration)
+        logger.info("  EntityBrowser:          %.3fs", _t_entity_browser)
+        logger.info("  P4 fetch_change:        %.3fs", _t_fetch_change)
+        logger.info("  TOTAL __init__:         %.3fs", _t_init_total)
+        logger.info("===========================")
         #################################################
 
     def _set_logger(self):
@@ -1207,85 +1254,167 @@ class AppDialog(QWidget):
     def refresh_entity_preset_tabs(self):
         """
         Refreshes the data displayed in the entity preset tabs, specifically
-        updating the 'To Sync' count for the 'My Tasks' preset.
+        updating the 'To Sync' count for each preset.
+
+        Walks the tree recursively to gather entity paths on the main thread,
+        then spawns a background thread to query sync counts in parallel via
+        ThreadPoolExecutor. Results are delivered back via sync_counts_ready.
         """
         logger.debug("Refreshing entity preset tabs...")
+        all_work_items = []
         for preset_name, preset in self._entity_presets.items():
-            if preset_name == "My Tasks":
-                logger.debug("Refreshing 'My Tasks' preset tab.")
-                view = preset.view
-                proxy_model = preset.proxy_model
-                source_model = proxy_model.sourceModel()
+            try:
+                source_model = preset.proxy_model.sourceModel()
 
-                # Ensure the model has the correct number of columns if it was somehow reset
+                # Ensure the model has the correct number of columns
                 if source_model.columnCount() < 2:
                     source_model.setColumnCount(2)
                     source_model.setHorizontalHeaderLabels(["Name", "To Sync"])
 
-                row_count = source_model.rowCount()
-                logger.debug(f"Found {row_count} rows in 'My Tasks' model.")
+                # Walk the tree to gather entity items for this preset
+                self._gather_sync_work_items(source_model, QtCore.QModelIndex(), all_work_items)
+            except Exception as e:
+                logger.error(f"Error processing preset '{preset_name}': {e}", exc_info=True)
 
-                for row in range(row_count):
-                    proxy_index = proxy_model.index(row, 0)
-                    if not proxy_index.isValid():
-                        # logger.debug(f"[REFRESH] Row {row}: Invalid proxy index")
+        if all_work_items:
+            logger.debug(f"Spawning background sync count queries for {len(all_work_items)} entities.")
+            thread = threading.Thread(
+                target=self._sync_count_worker,
+                args=(all_work_items,),
+                daemon=True,
+            )
+            thread.start()
+
+    def _gather_sync_work_items(self, model, parent_index, work_items):
+        """
+        Recursively walk the tree model gathering (persistent_index, entity_path)
+        pairs for any item that has a valid entity path (skipping Projects).
+        Works regardless of hierarchy depth — entities can be at root or nested.
+        """
+        row_count = model.rowCount(parent_index)
+        for row in range(row_count):
+            index = model.index(row, 0, parent_index)
+            if not index.isValid():
+                continue
+            item = model.itemFromIndex(index)
+            if not item:
+                continue
+
+            # Try to extract entity info from this item
+            collected = False
+            try:
+                (sg_data, entity_data) = model_item_data.get_item_data(item)
+                entity_path, entity_id, entity_type = self._get_entity_info(entity_data)
+                logger.debug(f"[GATHER] row={row}, text='{item.text()}', type={entity_type}, path={entity_path}")
+                if entity_type == "Project":
+                    # Never scan Projects — their full depot path is extremely
+                    # slow and the result is meaningless. Recurse past them.
+                    if model.rowCount(index) > 0:
+                        self._gather_sync_work_items(model, index, work_items)
+                    continue
+                if entity_id and entity_type and entity_path:
+                    persistent = QtCore.QPersistentModelIndex(index)
+                    work_items.append((persistent, entity_path))
+                    collected = True
+            except Exception:
+                pass
+
+            # Recurse into children if this item wasn't collected as an entity
+            if not collected and model.rowCount(index) > 0:
+                self._gather_sync_work_items(model, index, work_items)
+
+    def _sync_count_worker(self, work_items):
+        """
+        Background worker: queries sync counts in parallel using a
+        ThreadPoolExecutor with per-thread P4 connections.
+        Emits sync_counts_ready with results when done.
+        """
+        _t_start = time.perf_counter()
+        _local = threading.local()
+        connections = []
+        connections_lock = threading.Lock()
+
+        def _init_worker():
+            """Thread initializer: create one P4 connection per pool thread."""
+            conn = self._sync_manager.create_thread_connection()
+            _local.p4 = conn
+            with connections_lock:
+                connections.append(conn)
+
+        def _query_one(entity_path):
+            """Single sync count query using thread-local P4 connection."""
+            p4_conn = _local.p4
+            try:
+                count = 0
+                fstat_list = p4_conn.run_fstat(entity_path.rstrip('/') + '/...')
+                if not isinstance(fstat_list, list):
+                    return 0
+                for fstat in fstat_list:
+                    if not isinstance(fstat, dict):
                         continue
+                    client_file = fstat.get('clientFile')
+                    have_rev = fstat.get('haveRev', '0')
+                    head_rev = fstat.get('headRev', '0')
+                    if have_rev == '0' or have_rev == 'none':
+                        count += 1
+                    elif client_file:
+                        if not os.path.exists(client_file):
+                            count += 1
+                        elif self._sync_manager.to_sync(have_rev, head_rev):
+                            count += 1
+                return count
+            except Exception as e:
+                logger.debug(f"Sync count query failed for {entity_path}: {e}")
+                return 0
 
-                    source_index = proxy_model.mapToSource(proxy_index)
-                    if not source_index.isValid():
-                        # logger.debug(f"[REFRESH] Row {row}: Invalid source index")
-                        continue
+        max_workers = 4
+        results = []
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers, initializer=_init_worker) as pool:
+                futures = {
+                    pool.submit(_query_one, path): persistent_idx
+                    for persistent_idx, path in work_items
+                }
+                for future in as_completed(futures):
+                    persistent_idx = futures[future]
+                    count = future.result()
+                    results.append((persistent_idx, count))
+        finally:
+            for conn in connections:
+                try:
+                    conn.disconnect()
+                except Exception:
+                    pass
 
-                    # Get item using source_index.model()
-                    item_model = source_index.model()
-                    item = item_model.itemFromIndex(source_index)
+        _t_total = time.perf_counter() - _t_start
+        logger.info("=== P4SG sync count queries: %.3fs (%d entities, %d workers) ===",
+                     _t_total, len(work_items), max_workers)
+        self.sync_counts_ready.emit(results)
 
-                    if not item:
-                        # logger.debug(f"[REFRESH] Row {row}: No item in model")
-                        continue
-
-                    # Extract the Shotgun data and field value from the node item.
-                    (sg_data, entity_data) = model_item_data.get_item_data(item)
-
-                    entity_path, entity_id, entity_type = self._get_entity_info(entity_data)
-                    if not entity_id or not entity_type or not entity_path:
-                        # logger.debug(
-                        #    f"[REFRESH] Row {row}: Invalid entity info — Path: {entity_path}, ID: {entity_id}, Type: {entity_type}")
-                        # Ensure the second column exists even if entity info is bad
-                        if source_model.item(source_index.row(), 1) is None:
-                            source_model.setItem(source_index.row(), 1, QStandardItem("N/A"))
-                        continue
-
-                    #logger.debug(f"[REFRESH] Row {row}: Entity Path: {entity_path}")
-                    sync_count = self._get_sync_count_for_entity(entity_path)
-                    #logger.debug(f"[REFRESH] Row {row}: Sync count = {sync_count}")
-
-                    # Set value into the second column
-                    if sync_count == 0:
-                        msg = "Up to date"
-                    else:
-                        msg = "{} files".format(sync_count)
-
-                    # Get or create the item for the second column
-                    desc_item = source_model.item(source_index.row(), 1)
-                    if desc_item is None:
-                        desc_item = QStandardItem()
-                        source_model.setItem(source_index.row(), 1, desc_item)
-
-                    desc_item.setText(str(msg))  # Update text
-                    sync_icon = self.sync_icons.get_sync_pixmap(sync_count)
-                    if sync_icon:
-                        desc_item.setIcon(sync_icon)  # Update icon
-                    else:
-                        desc_item.setIcon(QIcon())  # Clear icon if none
-
-                logger.debug("Finished refreshing 'My Tasks' preset tab.")
-                # Trigger layout change to ensure the view updates visually
-                #source_model.layoutChanged.emit()
-                # view.update()  # <--- Removed this line
-                break  # Stop after refreshing 'My Tasks'
-        QCoreApplication.processEvents()
-        logger.debug("Entity preset tabs refresh complete.")
+    def _on_sync_counts_ready(self, results):
+        """Slot: applies sync count results to tree view items (main thread).
+        Uses QPersistentModelIndex to locate each item regardless of which
+        preset/model it belongs to.
+        """
+        for persistent_idx, sync_count in results:
+            if not persistent_idx.isValid():
+                continue
+            source_index = QtCore.QModelIndex(persistent_idx)
+            source_model = source_index.model()
+            row = source_index.row()
+            parent = source_index.parent()
+            msg = "Up to date" if sync_count == 0 else f"{sync_count} files"
+            # Get or create the sibling item in column 1
+            sibling_index = source_model.index(row, 1, parent)
+            desc_item = source_model.itemFromIndex(sibling_index)
+            if desc_item is None:
+                desc_item = QStandardItem()
+                parent_item = source_model.itemFromIndex(parent) if parent.isValid() else source_model.invisibleRootItem()
+                parent_item.setChild(row, 1, desc_item)
+            desc_item.setText(msg)
+            sync_icon = self.sync_icons.get_sync_pixmap(sync_count)
+            desc_item.setIcon(sync_icon if sync_icon else QIcon())
+        logger.debug("Sync counts applied (%d items).", len(results))
 
     def _get_latest(self):
         logger.debug("Getting latest...")
