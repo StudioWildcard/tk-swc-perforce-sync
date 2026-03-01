@@ -1679,15 +1679,11 @@ class AppDialog(QWidget):
                     (sg_data, entity_data) = model_item_data.get_item_data(item)
 
                     entity_path, entity_id, entity_type = self._get_entity_info(entity_data)
-                    if not entity_id or not entity_type or not entity_path:
-                        # logger.debug(
-                        #    f"[REFRESH] Row {row}: Invalid entity info — Path: {entity_path}, ID: {entity_id}, Type: {entity_type}")
-                        # Ensure the second column exists even if entity info is bad
+                    if not entity_id or not entity_type or not entity_path or entity_type == "Project":
                         if source_model.item(source_index.row(), 1) is None:
                             source_model.setItem(source_index.row(), 1, QStandardItem("N/A"))
                         continue
 
-                    # logger.debug(f"[REFRESH] Row {row}: Entity Path: {entity_path}")
                     sync_count = self._get_sync_count_for_entity(entity_path)
                     # logger.debug(f"[REFRESH] Row {row}: Sync count = {sync_count}")
 
@@ -3196,7 +3192,7 @@ class AppDialog(QWidget):
                     (sg_data, entity_data) = model_item_data.get_item_data(item)
                     entity_path, entity_id, entity_type_task = self._get_entity_info(entity_data)
 
-                    if entity_path:
+                    if entity_path and entity_type_task != "Project":
                         sync_count = self._get_sync_count_for_entity(entity_path)
                         sync_msg = "Up to date" if sync_count == 0 else f"{sync_count} files"
                         sync_icon = self.sync_icons.get_sync_pixmap(sync_count)
@@ -4077,6 +4073,15 @@ class AppDialog(QWidget):
             # Get filesystem path
             self._entity_path, entity_id, entity_type = self._get_entity_info(self._entity_data)
             logger.debug(f"Entity path determined as: {self._entity_path}")
+
+            # Skip all P4 queries for Project entities — scanning the entire
+            # depot is extremely slow and yields no useful information.
+            if entity_type == "Project":
+                logger.debug("Skipping P4 queries for Project entity.")
+                target_entity_for_panel = self._resolve_entity_for_panel(self._entity_data)
+                QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(target_entity_for_panel))
+                self._refresh_dependent_views()
+                return
 
             # Update sync count display for this entity
             if self._entity_path:
