@@ -743,8 +743,8 @@ class TreeViewWidget(QWidget):
                     sg_item = change_list[0]
                     if sg_item:
                         publish_time_txt = self._get_publish_time_info(sg_item)
-                        user_name_txt = sg_item.get("p4_user", None)
-                        description_txt = sg_item.get("description", None)
+                        user_name_txt = sg_item.get("p4_user", "")
+                        description_txt = sg_item.get("description", "")
 
                         item_data = "{} \t {} \t {} \t {}".format(key, publish_time_txt, user_name_txt, description_txt)
                 change_item = ChangeItem(key=str(key),

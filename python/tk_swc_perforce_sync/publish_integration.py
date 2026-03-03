@@ -760,6 +760,7 @@ class PublishIntegration(QtCore.QObject):
         self._add_log(msg, 2)
         self._update_fstat_data()
         self._fix_fstat_dict()
+        self._enrich_fstat_with_changelist_data()
 
         length = len(self._fstat_dict)
         if length > 0:
@@ -1588,10 +1589,21 @@ class PublishIntegration(QtCore.QObject):
         self._publish_model.async_refresh()
 
     def _update_fstat_data(self):
-        """Update the fstat data for the selected entity."""
-        selected_item = self._get_selected_entity()
-        entity_data = self._load_publishes_for_entity_item_fn(selected_item)
-        self._entity_path, entity_id, entity_type = self._get_entity_info(entity_data)
+        """Update the fstat data for the selected entity.
+
+        Uses entity_data pre-synced from the dialog (set by
+        _populate_submitted_widget) so the submitted view tracks entity
+        selection changes even when a different tab was active at the
+        time of selection.
+        """
+        entity_data = getattr(self, '_entity_data', None)
+        if entity_data is not None:
+            self._entity_path, entity_id, entity_type = self._get_entity_info(entity_data)
+        else:
+            # Fallback: derive entity info from tree selection
+            selected_item = self._get_selected_entity()
+            entity_data = self._load_publishes_for_entity_item_fn(selected_item)
+            self._entity_path, entity_id, entity_type = self._get_entity_info(entity_data)
         self.get_current_publish_data(entity_id, entity_type)
 
         if self._fstat_dict:
@@ -1750,6 +1762,24 @@ class PublishIntegration(QtCore.QObject):
             return changes
         except Exception as e:
             logger.error(f"Failed to retrieve submitted changelists for {folder_path}: {e}")
+
+    def _enrich_fstat_with_changelist_data(self):
+        """Fetch submitted changelist metadata and enrich fstat_dict with user/description."""
+        if not self._fstat_dict:
+            return
+
+        self._submitted_changes = {}
+        for key in self._item_path_dict:
+            if key:
+                depot_key = self._convert_local_to_depot(key).rstrip('/')
+                self._get_submitted_changelists(depot_key)
+
+        for fstat_key in self._fstat_dict:
+            entry = self._fstat_dict[fstat_key]
+            change = entry.get('headChange')
+            if change and change in self._submitted_changes:
+                entry['p4_user'] = self._submitted_changes[change].get('user', '')
+                entry['description'] = self._submitted_changes[change].get('desc', '')
 
     # -----------------------------------------------------------------------
     # Perforce UI display helpers

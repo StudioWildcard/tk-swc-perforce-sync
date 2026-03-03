@@ -2156,7 +2156,15 @@ class AppDialog(QWidget):
 
 
     def _populate_submitted_widget(self):
-        """Compatibility wrapper -- delegates to PublishIntegration."""
+        """Compatibility wrapper -- delegates to PublishIntegration.
+
+        Syncs the dialog's current entity data to publish_integration before
+        populating, following the same pattern as _populate_column_view_widget.
+        """
+        self._publish_integration._fstat_dict = self._fstat_dict
+        self._publish_integration._item_path_dict = self._item_path_dict
+        self._publish_integration._entity_path = self._entity_path
+        self._publish_integration._entity_data = self._entity_data
         self._publish_integration.populate_submitted_widget()
 
     def _reset_submitted_widget(self):
@@ -4277,6 +4285,7 @@ class AppDialog(QWidget):
                 # Clear stale data from previous entity so the user sees
                 # that a new selection is loading.
                 self._view_manager.clear_dependent_views()
+                self._reset_submitted_widget()
 
                 # Store selected_item so _on_perforce_data_ready can trigger
                 # the publish load after setting prefetched fstat_dict.
