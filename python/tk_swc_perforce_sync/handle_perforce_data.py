@@ -54,7 +54,7 @@ class PerforceData():
                     # logger.debug(">>>>>>>>>>  key is: {}".format(key))
                     key = "{}\\...".format(key)
                     # logger.debug("key is: {}".format(key))
-                    fstat_list = self._p4.run("fstat", key)
+                    fstat_list = self._p4.run("fstat", "-Ol", key)
                     for i, fstat in enumerate(fstat_list):
                         # if i == 0:
                         #    logger.debug(">>>>>>>>>  fstat is: {}".format(fstat))
@@ -79,6 +79,7 @@ class PerforceData():
                                 fstat_dict[modified_client_file]['depotFile'] = fstat.get('depotFile', None)
                                 fstat_dict[modified_client_file]['headAction'] = fstat.get('headAction', None)
                                 fstat_dict[modified_client_file]['headChange'] = fstat.get('headChange', None)
+                                fstat_dict[modified_client_file]['fileSize'] = fstat.get('fileSize', None)
 
             #logger.debug(">>>>>>>>>>  fstat_dict is: {}".format(fstat_dict))
             #for k, v in fstat_dict.items():
@@ -97,7 +98,11 @@ class PerforceData():
                             fstat_dict[modified_local_path]['Published'] = True
 
                             sg_item["haveRev"], sg_item["headRev"] = have_rev, head_rev
-                            sg_item["revision"] = "{}/{}".format(have_rev, head_rev)
+                            sg_item["revision"] = "#{}/{}".format(have_rev, head_rev)
+                            sg_item["headAction"] = fstat_dict[modified_local_path].get('headAction', None)
+                            sg_item["headChange"] = fstat_dict[modified_local_path].get('headChange', None)
+                            sg_item["headModTime"] = fstat_dict[modified_local_path].get('headModTime', 0)
+                            sg_item["fileSize"] = fstat_dict[modified_local_path].get('fileSize', None)
 
 
             sg_data_to_publish = []
@@ -124,7 +129,8 @@ class PerforceData():
                     sg_item["depotFile"] = fstat_dict[key]["depotFile"]
                     sg_item["headChange"] = fstat_dict[key]["headChange"]
                     sg_item["headModTime"] = fstat_dict[key].get('headModTime', 0)
-                    # sg_item["version_number"] = fstat_dict[key]["headRev"]
+                    sg_item["headAction"] = fstat_dict[key].get("headAction", None)
+                    sg_item["fileSize"] = fstat_dict[key].get("fileSize", None)
 
                     p4_status = fstat_dict[key].get("headAction", None)
                     sg_item["sg_status_list"] = self._get_p4_status(p4_status)

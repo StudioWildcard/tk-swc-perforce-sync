@@ -28,7 +28,6 @@ for name, cls in QtGui.__dict__.items():
     if isinstance(cls, type): globals()[name] = cls
 
 from . import constants
-from .date_time import create_modified_date
 
 logger = sgtk.platform.get_logger(__name__)
 
@@ -161,7 +160,7 @@ class ViewManager(QtCore.QObject):
         # Column headers
         self._headers = ["", "Folder", "Action", "Name", "Revision#", "Size(MB)",
                          "Extension", "Type", "User", "Task", "Status", "Step",
-                         "Date/Time", "Date Modified", "ID", "Description"]
+                         "Date/Time", "Date Modified", "Change#", "Description"]
 
         # Setup column view
         self._setup_column_view()
@@ -384,28 +383,17 @@ class ViewManager(QtCore.QObject):
         self._column_view_dict = {}
         self._standard_item_dict = {}
 
-        logger.info("[DIAG] ViewManager._populate_column_view_widget START: entity_path=%s, sg_data=%d, fstat_dict=%s",
-                    getattr(self, '_entity_path', None), len(self._sg_data) if self._sg_data else 0,
-                    len(self._fstat_dict) if getattr(self, '_fstat_dict', None) else 'None')
-        import time as _time
-        _t0 = _time.time()
         logger.debug("Setting up Column View table ...")
         self._setup_column_view()
         logger.debug("Getting Perforce data...")
         self._perforce_sg_data = self._get_perforce_sg_data()
-        length = len(self._perforce_sg_data)
-        logger.info("[DIAG] ViewManager._populate_column_view_widget: _get_perforce_sg_data returned %d items (%.3fs)",
-                    length, _time.time() - _t0)
         if not self._perforce_sg_data:
             self._perforce_sg_data = self._sg_data
+        length = len(self._perforce_sg_data) if self._perforce_sg_data else 0
         if self._perforce_sg_data and length > 0:
             msg = "\n <span style='color:#2C93E2'>Populating the Column View with {} files. Please wait...</span> \n".format(length)
             self.log_message.emit(msg, 2)
-            logger.info("[DIAG] ViewManager: calling _get_perforce_size (fstat_dict available=%s)...",
-                        bool(getattr(self, '_fstat_dict', None)))
-            _t1 = _time.time()
             self._perforce_sg_data = self._get_perforce_size(self._perforce_sg_data)
-            logger.info("[DIAG] ViewManager: _get_perforce_size took %.3fs", _time.time() - _t1)
             logger.debug("Populating Column View table...")
             logger.debug("Updating Column View is complete")
 
@@ -502,10 +490,8 @@ class ViewManager(QtCore.QObject):
         if description:
             description = description.split("\n")[0]
 
-        publish_id = 0
-        if "id" in sg_item:
-            publish_id = sg_item.get("id", 0)
-            new_sg_item["publish_id"] = publish_id
+        change_num = sg_item.get("headChange", "")
+        new_sg_item["change_num"] = change_num
 
         task_name = "N/A"
         step = "N/A"
@@ -516,7 +502,7 @@ class ViewManager(QtCore.QObject):
                 new_sg_item["task_name"] = task_name
                 step = sg_item.get("task.Task.step.Step.code", None)
                 if not step:
-                    step = self._get_pipeline_step(publish_id)
+                    step = self._get_pipeline_step(sg_item.get("id", 0))
                 new_sg_item["step"] = step
 
         task_status = sg_item.get("task.Task.sg_status_list", "N/A")
@@ -529,16 +515,20 @@ class ViewManager(QtCore.QObject):
                 user = user.get("name", "N/A")
                 new_sg_item["user"] = user
 
+        # Date/Time: SG publish time (created_at), falling back to P4 time
         dt = sg_item.get("created_at") or sg_item.get("headModTime") or sg_item.get("headTime") or None
         dt = float(dt) if dt else 0
         date = self._get_publish_time_for_column_view(dt)
         new_sg_item["date"] = date
-        date_modified = self._get_modified_date(dt)
+        # Date Modified: Perforce modification time (headModTime)
+        p4_dt = sg_item.get("headModTime") or sg_item.get("headTime") or None
+        p4_dt = float(p4_dt) if p4_dt else 0
+        date_modified = self._get_modified_date(p4_dt)
         new_sg_item["date_modified"] = date_modified
 
         sg_list = ["", folder, action, name, revision, size, file_extension,
                    type_name, user, task_name, task_status, step, date,
-                   date_modified, publish_id, description]
+                   date_modified, change_num, description]
 
         return new_sg_item, sg_list
 
@@ -557,14 +547,10 @@ class ViewManager(QtCore.QObject):
         publish_time = "N/A"
         if dt and dt > 0:
             try:
-                dt_datetime = datetime.datetime.fromtimestamp(dt)
-                publish_time = create_modified_date(dt_datetime)
-            except ValueError as e:
+                publish_time = datetime.datetime.fromtimestamp(dt).strftime("%Y-%m-%d %H:%M")
+            except (ValueError, OSError) as e:
                 logger.error(f"Error converting timestamp {dt} to datetime: {e}")
                 publish_time = "Invalid Date"
-            except Exception as e:
-                logger.error(f"Error in create_modified_date for timestamp {dt}: {e}")
-                publish_time = "Error"
         return publish_time
 
     def _get_publish_time_for_column_view(self, dt):
@@ -596,7 +582,7 @@ class ViewManager(QtCore.QObject):
         from .model_latestpublish import SgLatestPublishModel
         perforce_sg_data = []
         model = self.ui.publish_view.model()
-        logger.info("[DIAG] _get_perforce_sg_data: publish_view model rowCount=%d", model.rowCount())
+        logger.debug("_get_perforce_sg_data: publish_view model rowCount=%d", model.rowCount())
         if model.rowCount() > 0:
             for row in range(model.rowCount()):
                 model_index = model.index(row, 0)
@@ -611,16 +597,15 @@ class ViewManager(QtCore.QObject):
         return perforce_sg_data
 
     def _get_perforce_size(self, sg_data):
-        """Derive file sizes from the already-fetched fstat_dict rather than
-        making a separate P4 query. Falls back to a P4 query if fstat_dict
-        is not available."""
+        """Enrich sg_data items with Perforce fstat fields (fileSize, headAction,
+        headChange, headModTime, revision, etc.) from the cached fstat_dict.
+        Falls back to a P4 query for file sizes if fstat_dict is not available."""
         try:
             self._size_dict = {}
             fstat_dict = getattr(self, '_fstat_dict', None)
 
             if fstat_dict:
-                logger.info("[DIAG] _get_perforce_size: using CACHED fstat_dict (%d entries) — NO P4 query", len(fstat_dict))
-                # Build size lookup from cached fstat data (no P4 call)
+                # Try to build size lookup from cached fstat data
                 for fstat_key, fstat in fstat_dict.items():
                     client_file = fstat.get('clientFile', None)
                     size = fstat.get('fileSize', 'N/A')
@@ -629,31 +614,81 @@ class ViewManager(QtCore.QObject):
                         newkey = self._create_key(client_file)
                         if newkey and newkey not in self._size_dict:
                             self._size_dict[newkey] = {'fileSize': size}
-            else:
-                # Fallback: query P4 directly (original behavior)
-                logger.info("[DIAG] _get_perforce_size: fstat_dict NOT available — FALLING BACK to P4 query (THIS BLOCKS UI)")
+
+            # If fstat_dict didn't have fileSize (or wasn't available), query P4 for sizes.
+            # Uses 'p4 sizes' instead of 'fstat -Ol' — avoids expensive MD5 digest computation.
+            if not self._size_dict:
+                # Build depot→client lookup from fstat_dict so we can map sizes results
+                depot_to_client = {}
+                if fstat_dict:
+                    for entry in fstat_dict.values():
+                        depot = entry.get('depotFile')
+                        client = entry.get('clientFile')
+                        if depot and client:
+                            depot_to_client[self._create_key(depot)] = client
+
                 for key in self._item_path_dict:
                     if key:
-                        key = self._convert_local_to_depot(key).rstrip('/')
-                        fstat_list = self._p4.run("fstat", "-T", "fileSize, clientFile", "-Ol", key + '/...')
-                        for fstat in fstat_list:
-                            if fstat:
-                                size = fstat.get("fileSize", "N/A")
-                                if size != "N/A":
-                                    size = float("{:.2f}".format(int(size) / 1024 / 1024))
-                                client_file = fstat.get('clientFile', None)
-                                if client_file:
-                                    newkey = self._create_key(client_file)
+                        depot_key = self._convert_local_to_depot(key).rstrip('/')
+                        try:
+                            sizes_list = self._p4.run("sizes", depot_key + '/...')
+                        except Exception:
+                            sizes_list = []
+                        for entry in sizes_list:
+                            if isinstance(entry, dict):
+                                depot_file = entry.get('depotFile')
+                                file_size = entry.get('fileSize')
+                                if depot_file and file_size:
+                                    size_mb = float("{:.2f}".format(int(file_size) / 1024 / 1024))
+                                    # Map depot path to client path via fstat_dict lookup
+                                    client_file = depot_to_client.get(self._create_key(depot_file))
+                                    if client_file:
+                                        newkey = self._create_key(client_file)
+                                    else:
+                                        # Fallback: use depot path as key
+                                        newkey = self._create_key(depot_file)
                                     if newkey and newkey not in self._size_dict:
-                                        self._size_dict[newkey] = {'fileSize': size}
+                                        self._size_dict[newkey] = {'fileSize': size_mb}
+                logger.debug("_get_perforce_size: p4 sizes built _size_dict with %d entries", len(self._size_dict))
 
-            # Apply sizes to sg_data items
+            # Build a base-path lookup for fstat_dict, which may have
+            # keys with a '#revision' suffix (from publish_integration.py).
+            fstat_base_lookup = {}
+            if fstat_dict:
+                for fstat_key, fstat_entry in fstat_dict.items():
+                    base_key = fstat_key.rsplit('#', 1)[0] if '#' in fstat_key else fstat_key
+                    if base_key not in fstat_base_lookup:
+                        fstat_base_lookup[base_key] = fstat_entry
+
+            # Apply fstat fields to sg_data items
             for sg_item in sg_data:
                 if "path" in sg_item and "local_path" in sg_item["path"]:
                     local_path = sg_item["path"].get("local_path", None)
                     modified_local_path = self._create_key(local_path)
-                    if modified_local_path and modified_local_path in self._size_dict:
-                        sg_item["fileSize"] = self._size_dict[modified_local_path].get('fileSize', None)
+                    if modified_local_path:
+                        if modified_local_path in self._size_dict:
+                            sg_item["fileSize"] = self._size_dict[modified_local_path].get('fileSize', None)
+                        fstat_entry = fstat_base_lookup.get(modified_local_path)
+                        if fstat_entry:
+                            have_rev = fstat_entry.get('haveRev', "0")
+                            head_rev = fstat_entry.get('headRev', "0")
+                            sg_item["headAction"] = fstat_entry.get('headAction')
+                            sg_item["headChange"] = fstat_entry.get('headChange')
+                            sg_item["headModTime"] = fstat_entry.get('headModTime', 0)
+                            sg_item["haveRev"] = have_rev
+                            sg_item["headRev"] = head_rev
+                            sg_item["revision"] = "#{}/{}".format(have_rev, head_rev)
+                            # Set fileSize (bytes→MB) if not already set by _size_dict
+                            if not sg_item.get("fileSize"):
+                                raw = fstat_entry.get('fileSize')
+                                if raw:
+                                    try:
+                                        sg_item["fileSize"] = float("{:.2f}".format(int(raw) / 1024 / 1024))
+                                    except (ValueError, TypeError):
+                                        pass
+
+            logger.debug("_get_perforce_size: enriched %d sg_items, _size_dict has %d entries",
+                        len(sg_data), len(self._size_dict))
         except Exception as e:
             logger.debug("Error getting Perforce file size: {}".format(e))
         return sg_data

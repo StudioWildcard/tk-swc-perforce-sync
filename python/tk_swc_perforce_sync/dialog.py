@@ -1429,10 +1429,6 @@ class AppDialog(QWidget):
         thread-local P4 connection. Emits perforce_data_ready when done.
         """
         thread_p4 = None
-        logger.info("[DIAG] _perforce_data_worker START: entity_path=%s, sg_data_count=%d, gen=%d",
-                    entity_path, len(sg_data), generation)
-        import time as _time
-        _t0 = _time.time()
         try:
             thread_p4 = self._sync_manager.create_thread_connection()
 
@@ -1497,14 +1493,14 @@ class AppDialog(QWidget):
             # Only emit the signal (which triggers UI updates + deferred
             # publish load) if this result is still current.
             if generation == self._perforce_data_generation:
-                logger.info("[DIAG] _perforce_data_worker DONE in %.2fs: fstat_dict=%d entries, emitting signal (gen=%d)",
-                            _time.time() - _t0, len(fstat_dict), generation)
+                logger.debug("_perforce_data_worker: fstat_dict=%d entries, emitting signal (gen=%d)",
+                            len(fstat_dict), generation)
                 self.perforce_data_ready.emit(
                     fstat_dict, dict(item_path_dict), sg_data, entity_path
                 )
             else:
-                logger.info("[DIAG] _perforce_data_worker STALE in %.2fs: gen=%d vs current=%d, cached but not applied",
-                            _time.time() - _t0, generation, self._perforce_data_generation)
+                logger.debug("_perforce_data_worker: stale gen=%d vs current=%d, cached but not applied",
+                            generation, self._perforce_data_generation)
         except Exception as e:
             logger.error(f"Background P4 data retrieval failed: {e}", exc_info=True)
         finally:
@@ -1519,12 +1515,9 @@ class AppDialog(QWidget):
         Slot: receives perforce data from background thread, updates instance
         state and refreshes dependent views. Runs on main thread.
         """
-        logger.info("[DIAG] _on_perforce_data_ready ENTER: entity_path=%s, current=%s, fstat_dict=%d, main_view_mode=%s",
-                    entity_path, self._entity_path, len(fstat_dict), self.main_view_mode)
-
         # Stale check: if user navigated away, discard
         if self._entity_path != entity_path:
-            logger.info("[DIAG] _on_perforce_data_ready STALE — discarding (signal=%s, current=%s)",
+            logger.debug("_on_perforce_data_ready: stale — discarding (signal=%s, current=%s)",
                         entity_path, self._entity_path)
             return
 
@@ -1551,7 +1544,7 @@ class AppDialog(QWidget):
         deferred_item = getattr(self, '_deferred_publish_item', None)
         if deferred_item is not None:
             self._deferred_publish_item = None
-            logger.info("[DIAG] _on_perforce_data_ready: triggering deferred _load_publishes_for_entity_item")
+            logger.debug("_on_perforce_data_ready: triggering deferred _load_publishes_for_entity_item")
             self._load_publishes_for_entity_item(deferred_item)
             # Set prefetched data on the NEW handler (created by load_data)
             # before the async SG callback fires update_data.
@@ -1564,13 +1557,10 @@ class AppDialog(QWidget):
             # handler in case update_data hasn't fired yet.
             self._publish_model.set_prefetched_fstat_dict(fstat_dict)
 
-        logger.info("[DIAG] _on_perforce_data_ready: calling _refresh_dependent_views")
-
         # Refresh dependent views now that data is available
         self._refresh_dependent_views()
 
         self._add_log("\n <span style='color:#2C93E2'>Perforce Data Retrieval Completed</span> \n", 2)
-        logger.info("[DIAG] _on_perforce_data_ready COMPLETE for %s (%d fstat entries)", entity_path, len(fstat_dict))
 
     def _get_latest(self):
         logger.debug("Getting latest...")
@@ -1993,8 +1983,6 @@ class AppDialog(QWidget):
 
     def _populate_column_view_widget(self):
         """Compatibility wrapper -- delegates to ViewManager."""
-        logger.info("[DIAG] _populate_column_view_widget (dialog wrapper): entity_path=%s, sg_data=%d, fstat_dict=%d, item_path_dict=%d",
-                    self._entity_path, len(self._sg_data), len(self._fstat_dict), len(self._item_path_dict))
         self._view_manager.set_sg_data(self._sg_data)
         self._view_manager.set_item_path_dict(self._item_path_dict)
         self._view_manager.set_entity_path(self._entity_path)
@@ -4253,8 +4241,7 @@ class AppDialog(QWidget):
             cached = self._perforce_data_cache.get(self._entity_path)
             if cached:
                 fstat_dict, item_path_dict = cached
-                logger.info("[DIAG] Cache HIT for %s — %d fstat entries available",
-                            self._entity_path, len(fstat_dict))
+                logger.debug("Cache HIT for %s — %d fstat entries", self._entity_path, len(fstat_dict))
                 self._fstat_dict = fstat_dict
                 self._item_path_dict = item_path_dict
                 self._publish_integration._fstat_dict = fstat_dict
@@ -4280,7 +4267,7 @@ class AppDialog(QWidget):
                 self._view_manager.set_fstat_dict(fstat_dict)
                 self._refresh_dependent_views()
             else:
-                logger.info("[DIAG] Cache MISS for %s — deferring publish load until P4 data ready", self._entity_path)
+                logger.debug("Cache MISS for %s — deferring publish load until P4 data ready", self._entity_path)
 
                 # Clear stale data from previous entity so the user sees
                 # that a new selection is loading.
@@ -4299,7 +4286,7 @@ class AppDialog(QWidget):
                 # in _on_perforce_data_ready after fstat data is available.
                 self._perforce_data_generation += 1
                 generation = self._perforce_data_generation
-                logger.info("[DIAG] Dispatching background P4 query (gen=%d)", generation)
+                logger.debug("Dispatching background P4 query (gen=%d)", generation)
                 thread = threading.Thread(
                     target=self._perforce_data_worker,
                     args=(self._entity_path, [], generation),
@@ -4516,13 +4503,9 @@ class AppDialog(QWidget):
         copy can fall out of sync when mode buttons live on the ViewManager).
         """
         mode = self._view_manager.main_view_mode
-        logger.info("[DIAG] _refresh_dependent_views: vm.main_view_mode=%s (COLUMN=%s, SUBMITTED=%s)",
-                    mode, self.MAIN_VIEW_COLUMN, self.MAIN_VIEW_SUBMITTED)
         if mode == self.MAIN_VIEW_COLUMN:
-            logger.info("[DIAG] _refresh_dependent_views: scheduling _populate_column_view_widget via QTimer")
             QtCore.QTimer.singleShot(0, self._populate_column_view_widget)
         elif mode == self.MAIN_VIEW_SUBMITTED:
-            logger.info("[DIAG] _refresh_dependent_views: scheduling _populate_submitted_widget via QTimer")
             QtCore.QTimer.singleShot(0, self._populate_submitted_widget)
 
     def _after_syncing_operations(self):
@@ -4554,6 +4537,16 @@ class AppDialog(QWidget):
         self._publish_file_history_model.hard_refresh()
         self._publish_model.hard_refresh()
         self._setup_file_details_panel([])
+
+        # Repopulate column/submitted views once the publish model
+        # finishes reloading (one-shot connection).
+        def _refresh_views_after_reload():
+            try:
+                self._publish_model.data_refreshed.disconnect(_refresh_views_after_reload)
+            except Exception:
+                pass
+            self._refresh_dependent_views()
+        self._publish_model.data_refreshed.connect(_refresh_views_after_reload)
 
         if self._view_manager.main_view_mode == self.MAIN_VIEW_COLUMN:
             self._update_perforce_data()
