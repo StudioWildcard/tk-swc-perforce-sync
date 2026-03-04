@@ -4028,6 +4028,8 @@ class AppDialog(QWidget):
 
             if entity_path and len(entity_path) > 0:
                 entity_path = entity_path[-1]
+            else:
+                entity_path = None
                 # msg = "\n <span style='color:#2C93E2'>Entity path: {}</span> \n".format(entity_path)
                 # self._add_log(msg, 2)
         return entity_path, entity_id, entity_type
@@ -4193,6 +4195,13 @@ class AppDialog(QWidget):
             self._clear_ui_on_no_selection()
             return
 
+        # Ensure child nodes are loaded from cache before we inspect them.
+        # Without this, unexpanded tree folders report 0 children and the
+        # publish panel shows nothing (GitHub issue #6).
+        model = self._entity_presets[self._current_entity_preset].model
+        if model.canFetchMore(selected_item.index()):
+            model.fetchMore(selected_item.index())
+
         # 2. Extract data from the selected tree item
         sg_data_from_tree, field_value_from_tree = model_item_data.get_item_data(selected_item)
         logger.debug(
@@ -4225,6 +4234,18 @@ class AppDialog(QWidget):
             # Get filesystem path
             self._entity_path, entity_id, entity_type = self._get_entity_info(self._entity_data)
             logger.debug(f"Entity path determined as: {self._entity_path}")
+
+            # Entity types without filesystem templates (e.g. Step used as a
+            # grouping field) should be handled as intermediate nodes.
+            if not self._entity_path and entity_type != "Project":
+                logger.debug("No filesystem path for %s %s — handling as grouping node",
+                             entity_type, entity_id)
+                self._clear_entity_specific_data()
+                self._load_publishes_for_entity_item(selected_item)
+                self._update_sync_count_for_intermediate_node(selected_item)
+                QtCore.QTimer.singleShot(0, lambda: self._get_shotgun_panel_widget(None))
+                self._refresh_dependent_views()
+                return
 
             # Skip all P4 queries for Project entities
             if entity_type == "Project":
@@ -4269,8 +4290,12 @@ class AppDialog(QWidget):
             else:
                 logger.debug("Cache MISS for %s — deferring publish load until P4 data ready", self._entity_path)
 
-                # Clear stale data from previous entity so the user sees
-                # that a new selection is loading.
+                # Clear stale data from previous entity and show spinner
+                # so the user sees that a new selection is loading.
+                # The spinner hides automatically when the deferred
+                # _load_publishes_for_entity_item fires query_changed.
+                self._publish_model.clear()
+                self._publish_main_overlay.start_spin()
                 self._view_manager.clear_dependent_views()
                 self._reset_submitted_widget()
 

@@ -366,6 +366,9 @@ class ViewManager(QtCore.QObject):
             header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
 
         self.ui.column_view.clicked.connect(self.on_column_view_row_clicked)
+        self.ui.column_view.selectionModel().selectionChanged.connect(
+            self._on_column_view_selection_changed
+        )
 
         self._create_column_view_context_menu()
         self._create_column_view_header_context_menu()
@@ -997,6 +1000,12 @@ class ViewManager(QtCore.QObject):
     # -----------------------------------------------------------------------
     # Column view row click handlers
     # -----------------------------------------------------------------------
+
+    def _on_column_view_selection_changed(self, selected, deselected):
+        """Handle selection changes in column view (keyboard nav, programmatic, etc.)."""
+        indexes = selected.indexes()
+        if indexes:
+            self.on_column_view_row_clicked(indexes[0])
 
     def on_column_view_row_clicked(self, index):
         if self._set_groups:
