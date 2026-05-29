@@ -80,9 +80,9 @@ class Ui_PublishListWidget(object):
         QMetaObject.connectSlotsByName(PublishListWidget)
 
     def retranslateUi(self, PublishListWidget):
-        PublishListWidget.setWindowTitle(QApplication.translate("PublishListWidget", "Form", None, QApplication.UnicodeUTF8))
-        self.label_1.setText(QApplication.translate("PublishListWidget", "Rendered image ABX123", None, QApplication.UnicodeUTF8))
-        self.label_2.setText(QApplication.translate("PublishListWidget", "v014 by John Smith on 2000-01-01 12:23", None, QApplication.UnicodeUTF8))
-        self.button.setText(QApplication.translate("PublishListWidget", "Actions", None, QApplication.UnicodeUTF8))
+        PublishListWidget.setWindowTitle(QApplication.translate("PublishListWidget", "Form", None))
+        self.label_1.setText(QApplication.translate("PublishListWidget", "Rendered image ABX123", None))
+        self.label_2.setText(QApplication.translate("PublishListWidget", "v014 by John Smith on 2000-01-01 12:23", None))
+        self.button.setText(QApplication.translate("PublishListWidget", "Actions", None))
 
 from . import resources_rc

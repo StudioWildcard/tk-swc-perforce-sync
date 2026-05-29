@@ -74,11 +74,11 @@ class Ui_PublishHistoryWidget(object):
         QMetaObject.connectSlotsByName(PublishHistoryWidget)
 
     def retranslateUi(self, PublishHistoryWidget):
-        PublishHistoryWidget.setWindowTitle(QApplication.translate("PublishHistoryWidget", "Form", None, QApplication.UnicodeUTF8))
-        self.header_label.setText(QApplication.translate("PublishHistoryWidget", "Header", None, QApplication.UnicodeUTF8))
-        self.button.setText(QApplication.translate("PublishHistoryWidget", "Actions", None, QApplication.UnicodeUTF8))
+        PublishHistoryWidget.setWindowTitle(QApplication.translate("PublishHistoryWidget", "Form", None))
+        self.header_label.setText(QApplication.translate("PublishHistoryWidget", "Header", None))
+        self.button.setText(QApplication.translate("PublishHistoryWidget", "Actions", None))
         self.body_label.setText(QApplication.translate("PublishHistoryWidget", "TextLabel\n"
 "Foo\n"
-"Bar", None, QApplication.UnicodeUTF8))
+"Bar", None))
 
 from . import resources_rc

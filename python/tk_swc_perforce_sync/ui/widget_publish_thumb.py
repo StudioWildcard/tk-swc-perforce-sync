@@ -58,9 +58,9 @@ class Ui_PublishThumbWidget(object):
         QMetaObject.connectSlotsByName(PublishThumbWidget)
 
     def retranslateUi(self, PublishThumbWidget):
-        PublishThumbWidget.setWindowTitle(QApplication.translate("PublishThumbWidget", "Form", None, QApplication.UnicodeUTF8))
+        PublishThumbWidget.setWindowTitle(QApplication.translate("PublishThumbWidget", "Form", None))
         self.label.setText(QApplication.translate("PublishThumbWidget", "TextLabel\n"
-"Foo", None, QApplication.UnicodeUTF8))
-        self.button.setText(QApplication.translate("PublishThumbWidget", "Actions", None, QApplication.UnicodeUTF8))
+"Foo", None))
+        self.button.setText(QApplication.translate("PublishThumbWidget", "Actions", None))
 
 from . import resources_rc

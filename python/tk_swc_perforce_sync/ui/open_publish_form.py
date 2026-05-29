@@ -54,7 +54,7 @@ class Ui_OpenPublishForm(object):
         QMetaObject.connectSlotsByName(OpenPublishForm)
 
     def retranslateUi(self, OpenPublishForm):
-        OpenPublishForm.setWindowTitle(QApplication.translate("OpenPublishForm", "Form", None, QApplication.UnicodeUTF8))
-        self.cancel_btn.setText(QApplication.translate("OpenPublishForm", "Cancel", None, QApplication.UnicodeUTF8))
-        self.open_btn.setText(QApplication.translate("OpenPublishForm", "Open", None, QApplication.UnicodeUTF8))
+        OpenPublishForm.setWindowTitle(QApplication.translate("OpenPublishForm", "Form", None))
+        self.cancel_btn.setText(QApplication.translate("OpenPublishForm", "Cancel", None))
+        self.open_btn.setText(QApplication.translate("OpenPublishForm", "Open", None))
 

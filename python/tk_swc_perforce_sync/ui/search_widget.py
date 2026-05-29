@@ -41,8 +41,8 @@ class Ui_SearchWidget(object):
         return self.search.text()
 
     def retranslateUi(self, SearchWidget):
-        SearchWidget.setWindowTitle(QApplication.translate("SearchWidget", "Form", None, QApplication.UnicodeUTF8))
+        SearchWidget.setWindowTitle(QApplication.translate("SearchWidget", "Form", None))
         self.search.setToolTip(QApplication.translate("SearchWidget", "Enter some text to filter the publishes shown in the view below.<br>\n"
-"Click the magnifying glass icon above to disable the filter.", None, QApplication.UnicodeUTF8))
+"Click the magnifying glass icon above to disable the filter.", None))
 
 from . import resources_rc
